@@ -3,7 +3,6 @@ import httpx
 import json
 from openai import OpenAI
 from retriever_neo4j import load_stores, retrieve_and_get_content
-from process_mermaid import clean_mermaid_code
 
 http_client = httpx.Client(proxy=None, trust_env=False)
 client = OpenAI(
@@ -86,7 +85,7 @@ class IntegratorAgent:
     def __init__(self, client):
         self.client = client
 
-    def integrate_and_generate_mermaid(self, query, plan, retrieved_info):
+    def integrate_arch(self, query, plan, retrieved_info):
         prompt = f"""
         You are a professional designer and researcher in the field of HCI. Try to plan a pipeline based on the user's requirements and the retrieved information, and generate a Mermaid graph/flowchart to visualize the pipeline. 
         User Query: {query}
@@ -135,12 +134,10 @@ class IntegratorAgent:
             return None
         try:
             print(response)
-            mermaid_code = json.loads(response)["mermaid_code"]
-            cleaned_code = clean_mermaid_code(mermaid_code)
         except json.JSONDecodeError:
             print("Failed to parse JSON response.")
             return None
-        return cleaned_code
+        return response
     
 class DrawerAgent:
     def __init__(self, client):
@@ -168,13 +165,13 @@ class DrawerAgent:
                 response_format={"type": "json_object"},
             ).choices[0].message.content
             raw_code = json.loads(response)["mermaid_code"]
-            clean_code = clean_mermaid_code(raw_code)
+            clean_code = self.clean_mermaid_code(raw_code)
             return clean_code
         except Exception as e:
             print(f"Error: {e}")
             return None
         
-    def clean_mermaid_code(code):
+    def clean_mermaid_code(self,code):
         """
         清理Mermaid代码中的转义字符
         """
@@ -223,7 +220,7 @@ def main():
     print("Retrieval finished. Retrieved Info:")
     print(json.dumps(retrieved_info, indent=2))
 
-    arch = integrator.integrate_and_generate_mermaid(query=user_query, plan=arch_plan, retrieved_info=retrieved_info)
+    arch = integrator.integrate_arch(query=user_query, plan=arch_plan, retrieved_info=retrieved_info)
     mermaid_code = drawer.draw_flowchart(arch)
     print(mermaid_code)
 
