@@ -20,6 +20,23 @@ NEO4J_USERNAME = "neo4j"
 NEO4J_PASSWORD = "BQLjYc4gOpIxTi6o5c-es481vKejEHHBGuxJeEvX9hg"
 NEO4J_URL = "neo4j+s://8891a7fc.databases.neo4j.io"
 
+STANDARD_IO_MAP = {
+    "text":["text", "query", "string", "prompt", "document"],
+    "image":["image", "frame", "picture", "visual"],
+    "video":["video", "stream", "film", "footage", "recording"],
+    "audio":["audio", "sound", "voice", "music", "speech"],
+    "structured_data":["json", "csv", "vector", "database", "embedding", "graph"],
+    "user_interaction":["click", "interaction", "gesture", "feedback"]
+}
+
+def normalize_io_type(raw_text):
+    if not raw_text or raw_text == "NONE":
+        return "unknown"
+    for std_type, keywords in STANDARD_IO_MAP.items():
+        if any(k in raw_text.lower() for k in keywords):
+            return std_type
+    return "unknown"
+
 def initialize_storage():
     if not os.path.exists(STORAGE_DIR):
         os.makedirs(STORAGE_DIR)
@@ -58,6 +75,9 @@ def parse_json_to_graph_elements(json_path):
     
     # 2. 查找表：Mermaid ID -> 全名 ID (用于快速定位子节点)
     component_lookup = {}
+    # Component --> Parent
+    component_to_parent_map = {}
+    existing_module_flows = set()
 
     article_info = data.get('article_information', {}) 
     if not article_info:
@@ -79,6 +99,7 @@ def parse_json_to_graph_elements(json_path):
     )
 
     system_metadata = {
+        "name": system_id,
         "file_name": file_name,
         "type": "SYSTEM",
         "full_code": overview.get("full_code", "")
@@ -102,6 +123,11 @@ def parse_json_to_graph_elements(json_path):
         
         mermaid = module_data.get('mermaid_spec', {})
         io_sig = module_data.get('io_signature', {})
+        raw_in = io_sig.get('input_type', '')
+        raw_out = io_sig.get('output_type', '')
+
+        std_in = normalize_io_type(raw_in)
+        std_out = normalize_io_type(raw_out)
         
         mod_text = (
             f"Module: {module_name}\n"
@@ -116,7 +142,12 @@ def parse_json_to_graph_elements(json_path):
             "type": "MODULE",
             "role": module_data.get('role', 'processor'),
             "code": mermaid.get('definition_code', ''),
-            "parent_system_id": system_id
+            "parent_system_id": system_id,
+            "source": file_name,
+            "std_in": std_in,
+            "std_out": std_out,
+            "raw_in": raw_in,
+            "raw_out": raw_out
         }
 
         mod_node = TextNode(
@@ -145,6 +176,7 @@ def parse_json_to_graph_elements(json_path):
             
             # 存入查找表
             component_lookup[sub_raw_id] = sub_full_id
+            component_to_parent_map[sub_full_id] = mod_id
             
             sub_text = (
                 f"Component: {sub_raw_id}\n"
@@ -175,6 +207,7 @@ def parse_json_to_graph_elements(json_path):
         if not mod_id: mod_id = module_name
         mod_id = str(mod_id).strip()
 
+        component_to_parent_map[mod_id] = mod_id
         mermaid = module_data.get('mermaid_spec', {})
         ports = mermaid.get('ports', {})
         outgoing = ports.get('outgoing', [])
@@ -222,13 +255,26 @@ def parse_json_to_graph_elements(json_path):
 
             # --- C. 创建所有连线 ---
             for src_id in source_candidates:
-                if src_id in created_node_ids: # 双重检查
+                if src_id in created_node_ids and target_full_id in created_node_ids: # 双重检查
                     relations.append(Relation(
                         source_id=src_id,
                         target_id=target_full_id,
                         label="FLOWS_TO",
                         properties={"meaning": conn.get('data_flow_meaning', 'Data Flow'), "description": conn.get('edge_label', '')}
                     ))
+
+                    parent_src = component_to_parent_map.get(src_id, src_id)
+                    parent_tgt = component_to_parent_map.get(target_full_id, target_full_id)
+
+                    if parent_src != parent_tgt:
+                        flow_key = f"{parent_src}->{parent_tgt}"
+                        relations.append(Relation(
+                            source_id=parent_src,
+                            target_id=parent_tgt,
+                            label="FLOWS_TO",
+                            properties={"type": "high_level", "generated_from": f"{src_id}->{target_full_id}"}
+                        ))
+                        existing_module_flows.add(flow_key)
 
     return nodes, relations
 

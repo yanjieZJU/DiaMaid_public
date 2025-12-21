@@ -35,17 +35,15 @@ def load_stores():
         exit(1)
     return vector_store, graph_store
 
-def custom_retrieve(query_text, vector_store, graph_store, top_k=5, in_type=None, out_type=None):
+def custom_retrieve(query_text, vector_store, graph_store, top_k=5, in_type_filter=None):
     print(f"\n🔍 Executing Custom Retrieval for: '{query_text}'")
     
     embed_model = OpenAIEmbedding(model_name="text-embedding-3-small")
     query_embedding = embed_model.get_query_embedding(query_text)
 
     filter_list = [ExactMatchFilter(key="type", value="MODULE")]
-    # if in_type:
-    #     filter_list.append(ExactMatchFilter(key="input_type", value=in_type))
-    # if out_type: 
-    #     filter_list.append(ExactMatchFilter(key="output_type", value=out_type))
+    if in_type_filter:
+        filter_list.append(ExactMatchFilter(key="std_in", value=in_type_filter))
 
     filters = MetadataFilters(filters=filter_list)
     
@@ -66,39 +64,50 @@ def custom_retrieve(query_text, vector_store, graph_store, top_k=5, in_type=None
         for node_id, score in zip(found_ids, found_scores):
             # 修正查询: 匹配任何标签，只要ID对上
             cypher = """
-            MATCH (n:LlamaNode) WHERE n.id = $id 
-            RETURN n.text as text, n.name as name, n.id as id, n.code as code, n.node_type as node_type, properties(n) as props
+            MATCH (center:LlamaNode) WHERE center.id = $id 
+            OPTIONAL MATCH (sys:LlamaNode {type: 'SYSTEM'})-[:HAS_MODULE]->(center) // origin
+            OPTIONAL MATCH (prev:LlamaNode)-[:FLOWS_TO]->(center) // upstream
+            OPTIONAL MATCH (center)-[:FLOWS_TO]->(next:LlamaNode) // downstream
+            RETURN 
+                center, sys.file_name as source_file, sys.text as system_context,
+                collect(distinct {name: prev.name, id: prev.id, function: prev.text, code: prev.code}) as upstreams,
+                collect(distinct {name: next.name, id: next.id, function: next.text, code: next.code}) as downsteams
             """
             result = session.run(cypher, id=node_id).single()
             
             if result:
-                text_content = result["text"]
-                name = result["name"]
-                code = result["code"]
-                node_type = result["node_type"]
-                
-                # [DEBUG] 如果内容还是空，打印所有属性看看
-                if not text_content:
-                    print(f"   ⚠️ Found Node {node_id}, but 'text_content' is missing/empty.")
-                    print(f"      Available properties: {result['props'].keys()}")
-                    text_content = str(result['props'])
+                center_node = result["center"]
+                source_file = result.get("source_file") or center_node.get("source_file")
+                upstreams = result["upstreams"]
+                downstreams = result["downsteams"]
+                enriched_text = (
+                    f"Module: {center_node.get('name')}\n"
+                    f"Source: {source_file}\n"
+                    f"Text content: {center_node.get('text')}\n"
+                    f"--- Context ---\n"
+                    f"Typically Proceded By: {[u['name'] for u in upstreams]}\n"
+                    f"Typically Followed By: {[d['name'] for d in downstreams]}\n"
+                )
                 
                 # Reconstruct node
-                node = TextNode(text=text_content, id_=result["id"])
-                node.metadata["name"] = name
-                node.metadata["type"] = node_type
-                node.metadata["code"] = code
+                node = TextNode(text=enriched_text, id_=center_node["id"])
+                node.metadata = dict(center_node)
+                node.metadata["topology"] = {
+                    "upstream": upstreams,
+                    "downstream": downstreams,
+                    "source_file": source_file,
+                }
                 retrieved_nodes.append(NodeWithScore(node=node, score=score))
             else:
                 print(f"   ❌ ID {node_id} NOT FOUND in Neo4j. (This should not happen with MERGE)")
 
     return retrieved_nodes
 
-def retrieve_and_get_content(query, vector_store=None, graph_store=None, top_k=5, in_type=None, out_type=None):
+def retrieve_and_get_content(query, vector_store=None, graph_store=None, top_k=5, in_type=None):
     if vector_store is None or graph_store is None:
         vector_store, graph_store = load_stores()
 
-    retrieved_nodes = custom_retrieve(query, vector_store, graph_store, top_k, in_type, out_type)
+    retrieved_nodes = custom_retrieve(query, vector_store, graph_store, top_k, in_type)
     return retrieved_nodes
 
 
@@ -106,15 +115,11 @@ if __name__ == "__main__":
     vector_store, graph_store = load_stores()
     query = "Module: Content Generation Module\n Function: Creates accurate, comprehensive, and contextually rich history content tailored to the user's level, interests, and learning goals"
     
-    retrieved_nodes = custom_retrieve(query, vector_store, graph_store)
+    retrieved_nodes = custom_retrieve(query, vector_store, graph_store, in_type_filter="text")
 
     print("\n" + "="*50)
     print(f"✅ Found {len(retrieved_nodes)} nodes with content.")
     for n in retrieved_nodes:
-        code_snippet = n.node.metadata.get("code", "")
-        if code_snippet:
-            code_snippet = code_snippet[:50].replace("\n", " ")
-        else:
-            code_snippet = "N/A"
-        print(f"ID: {n.node.node_id} | Code: {code_snippet}...")
+        print(n.node.text)
+        print(n.node.metadata.get("topology", "N/A"))
     print("="*50 + "\n")
