@@ -1,77 +1,53 @@
 // client/src/App.jsx
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import MermaidDiagram from './MermaidDiagram';
 import './App.css';
 import axios from 'axios';
 
 function App() {
-  // --- 状态管理 ---
-  
-  // 1. 用户输入的总体描述
   const [description, setDescription] = useState('');
-  
-  // 2. 用户手动创建的节点列表 (模拟可视化界面的节点数据)
-  const [nodes, setNodes] = useState([{ id: 1, text: '开始' }]);
-
-  // 3. 后端返回的 Mermaid 代码 (这里先给一个默认值用于测试)
-  const [mermaidCode, setMermaidCode] = useState(`
-    graph TD
-    A[开始] --> B{是否也是简单?}
-    B -- 是 --> C[完成前端]
-    B -- 否 --> D[继续优化]
-  `);
-
+  const [nodes, setNodes] = useState([]);
+  const [newNodeName, setNewNodeName] = useState('');
+  const [mermaidCode, setMermaidCode] = useState('');
   const [loading, setLoading] = useState(false);
+  const canvasRef = useRef(null);
 
-  // --- 事件处理 ---
-
-  // 添加一个新节点输入框
+  // 添加节点
   const addNode = () => {
-    const newNode = { id: Date.now(), text: '' };
+    if (!newNodeName.trim()) return;
+    
+    // 计算画布中心位置
+    const width = canvasRef.current ? canvasRef.current.offsetWidth : 800;
+    const height = canvasRef.current ? canvasRef.current.offsetHeight : 600;
+
+    const newNode = {
+      id: Date.now(),
+      name: newNodeName.trim(),
+      // 简单的随机散布在中心附近
+      x: width / 2 + (Math.random() * 200 - 100),
+      y: height / 2 + (Math.random() * 200 - 100)
+    };
+    
     setNodes([...nodes, newNode]);
+    setNewNodeName('');
   };
 
-  // 更新节点文本
-  const updateNodeText = (id, newText) => {
-    const updatedNodes = nodes.map(node => 
-      node.id === id ? { ...node, text: newText } : node
-    );
-    setNodes(updatedNodes);
-  };
-
-  // 删除节点
   const removeNode = (id) => {
     setNodes(nodes.filter(node => node.id !== id));
   };
 
-  // 发送给后端
   const handleGenerate = async () => {
-    if (!description && nodes.length === 0) {
-      alert("请输入描述或至少添加一个节点");
-      return;
-    }
-
+    if (!description && nodes.length === 0) return;
     setLoading(true);
-    setMermaidCode(''); // 清空旧图，提示用户正在生成
-
     try {
-      // 1. 发送请求给 FastAPI 后端
       const response = await axios.post('http://localhost:8000/generate', {
         prompt: description,
-        userNodes: nodes.map(n => n.text) // 提取节点文本数组
+        userNodes: nodes.map(n => n.name)
       });
-
-      // 2. 获取后端返回的代码
-      const generatedCode = response.data.code;
-      console.log("后端返回代码:", generatedCode);
-      
-      // 3. 更新状态，MermaidDiagram 组件会自动重绘
-      setMermaidCode(generatedCode);
-
+      setMermaidCode(response.data.code);
     } catch (error) {
-      console.error("请求失败:", error);
-      alert("生成失败，请检查后端服务是否启动。");
-      setMermaidCode(`graph TD\nError[生成出错: ${error.message}]`);
+      console.error(error);
+      setMermaidCode(`graph TD\nError[生成失败: ${error.message}]`);
     } finally {
       setLoading(false);
     }
@@ -80,59 +56,115 @@ function App() {
   return (
     <div className="app-container">
       <header>
-        <h1>AI 流程图生成器</h1>
+        <h1>DiaMaid - 智能流程图设计台</h1>
       </header>
 
       <main className="main-content">
-        {/* 左侧：输入控制区 */}
-        <div className="input-panel">
-          <div className="section">
-            <h3>1. 总体描述</h3>
-            <textarea 
-              placeholder="例如：生成一个用户注册的流程图..." 
-              value={description}
-              onChange={(e) => setDescription(e.target.value)}
-              rows={3}
-            />
-          </div>
-
-          <div className="section">
-            <h3>2. 定义关键节点</h3>
-            <div className="node-list">
-              {nodes.map((node, index) => (
-                <div key={node.id} className="node-item">
-                  <span className="node-label">节点 {index + 1}:</span>
-                  <input 
-                    type="text" 
-                    value={node.text}
-                    onChange={(e) => updateNodeText(node.id, e.target.value)}
-                    placeholder="输入节点内容"
-                  />
-                  <button onClick={() => removeNode(node.id)} className="btn-delete">×</button>
-                </div>
-              ))}
-            </div>
-            <button onClick={addNode} className="btn-secondary">+ 添加节点</button>
-          </div>
-
-          <button 
-            onClick={handleGenerate} 
-            disabled={loading} 
-            className="btn-primary"
-          >
-            {loading ? '生成中...' : '生成流程图'}
-          </button>
-        </div>
-
-        {/* 右侧：显示区 */}
-        <div className="display-panel">
-          <h3>渲染结果</h3>
-          <MermaidDiagram code={mermaidCode} />
+        <div className="generator-layout">
           
-          <div className="code-preview">
-            <h4>原始 Mermaid 代码:</h4>
-            <pre>{mermaidCode}</pre>
+          {/* --- 左侧边栏 (输入 + 工具 + 代码) --- */}
+          <div className="sidebar-left">
+            
+            {/* 1. 需求描述 */}
+            <div className="left-card" style={{ flex: '0 0 auto' }}>
+              <div className="card-title">需求描述</div>
+              <textarea 
+                className="styled-input"
+                rows={4}
+                placeholder="例如：设计一个包含RAG和LLM的历史教育系统..."
+                value={description}
+                onChange={(e) => setDescription(e.target.value)}
+              />
+            </div>
+
+            {/* 2. 功能面板 (手动节点) */}
+            <div className="left-card" style={{ flex: '0 0 auto' }}>
+              <div className="card-title">功能面板 (预设节点)</div>
+              <div className="action-bar" style={{marginTop:0}}>
+                <input 
+                  className="styled-input"
+                  style={{marginBottom:0}}
+                  placeholder="节点名称"
+                  value={newNodeName}
+                  onChange={(e) => setNewNodeName(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && addNode()}
+                />
+                <button className="btn-add" onClick={addNode}>添加</button>
+              </div>
+              
+              {/* 显示已添加的标签 */}
+              <div className="manual-nodes-container">
+                {nodes.length === 0 && <span style={{color:'#ccc', fontSize:'12px'}}>暂无节点</span>}
+                {nodes.map(node => (
+                  <span key={node.id} className="tag-node">
+                    {node.name}
+                    <span className="tag-remove" onClick={() => removeNode(node.id)}>×</span>
+                  </span>
+                ))}
+              </div>
+
+              <button 
+                className="btn-primary" 
+                style={{marginTop: '15px'}}
+                onClick={handleGenerate}
+                disabled={loading}
+              >
+                {loading ? '生成中...' : '开始生成流程图'}
+              </button>
+            </div>
+
+            {/* 3. 生成的代码 (对应草图左下角) */}
+            <div className="left-card" style={{ flex: '1 1 auto' }}>
+              <div className="card-title">生成的 Mermaid 代码</div>
+              <textarea 
+                className="styled-input code-editor-area"
+                value={mermaidCode}
+                onChange={(e) => setMermaidCode(e.target.value)}
+                placeholder="Mermaid 代码将在这里生成，支持手动修改..."
+                spellCheck="false"
+              />
+            </div>
           </div>
+
+          {/* --- 中间画布 (图表 + 节点) --- */}
+          <div className="panel canvas-panel" ref={canvasRef}>
+            {/* 这里的 div 用于展示手动节点 */}
+            <div className="canvas-overlay">
+               {nodes.map(node => (
+                 <div 
+                   key={node.id}
+                   className="manual-node-visual"
+                   style={{ left: node.x, top: node.y }}
+                 >
+                   {node.name}
+                 </div>
+               ))}
+            </div>
+
+            {/* 这里的 MermaidDiagram 是主要的渲染结果 */}
+            <div className="mermaid-wrapper">
+              {mermaidCode ? (
+                <MermaidDiagram code={mermaidCode} />
+              ) : (
+                <div style={{color: '#999', textAlign:'center'}}>
+                  <h3>画布空闲</h3>
+                  <p>请在左侧输入需求并生成，<br/>或者在功能面板添加手动节点。</p>
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* --- 右侧边栏 (属性/详情) --- */}
+          <div className="panel sidebar-right">
+            <div className="card-title">节点属性 / 详情</div>
+            <div className="info-placeholder">
+              生成图表后，<br/>
+              点击画布上的节点<br/>
+              可在此处查看详细信息<br/>
+              (该功能待开发)
+            </div>
+          </div>
+
         </div>
       </main>
     </div>
