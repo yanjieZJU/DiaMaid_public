@@ -70,213 +70,190 @@ def parse_json_to_graph_elements(json_path):
     nodes = []
     relations = []
     
-    # 1. 注册表：记录所有已创建节点的 ID
-    created_node_ids = set()
-    
-    # 2. 查找表：Mermaid ID -> 全名 ID (用于快速定位子节点)
-    component_lookup = {}
-    # Component --> Parent
-    component_to_parent_map = {}
-    existing_module_flows = set()
-
-    article_info = data.get('article_information', {}) 
-    if not article_info:
-        article_info = data.get('article_info', {}) 
-        
-    diagram = data.get('diagram', {})
-    overview = diagram.get('overview', {})
-    modules = diagram.get('modules', {})
+    article_info = data.get('basic_information', {}) or data.get('article_information', {}) 
+    workflows = data.get('workflows', [])
+    modules = data.get('modules', [])
+    full_code = data.get('full_code', '')
 
     file_name = article_info.get('file_name', os.path.basename(json_path))
 
-    # --- 1. 创建 System 根节点 ---
-    system_id = f"SYS_{file_name}_{uuid.uuid4().hex[:8]}".replace(" ", "_")
+    if article_info.get("arch_exits") == "False":
+        return None
+
+    # --- 1. 创建 Article 根节点 ---
+    article_id = f"ART_{uuid.uuid4().hex[:8]}"
     
-    system_text = (
-        f"System Function: {article_info.get('function','')}\n"
+    article_text = (
+        f"Article: {file_name}\n"
+        f"Function: {article_info.get('function','')}\n"
         f"Application Scenarios: {article_info.get('application_scenarios', '')}\n"
-        f"Diagram Caption: {overview.get('caption', '')}"
+        f"Diagram Caption: {article_info.get('caption', '')}"
     )
 
-    system_metadata = {
-        "name": system_id,
-        "file_name": file_name,
-        "type": "SYSTEM",
-        "full_code": overview.get("full_code", "")
+    article_metadata = {
+        "name": file_name,
+        "source": file_name,
+        "type": "ARTICLE",
+        "full_code": full_code
     }
 
-    system_node  = TextNode(
-        text=system_text,
-        id_=system_id,
-        metadata=system_metadata,
+    article_node = TextNode(
+        text=article_text,
+        id_=article_id,
+        metadata=article_metadata,
         excluded_embed_metadata_keys=["full_code"],
         excluded_llm_metadata_keys=[]
     )
-    nodes.append(system_node)
-    created_node_ids.add(system_id)
+    nodes.append(article_node)
 
-    # --- 2. 创建 Module 和 Component 节点 ---
-    for module_name, module_data in modules.items():
+    # 创建映射字典 - 使用 mod_id 和 flow_id 作为键
+    module_id_to_node_id = {}
+    flow_id_to_node_id = {}
+
+    # --- 2. 创建 Module 节点 ---
+    for module_data in modules:
         mod_id = module_data.get('mod_id')
-        if not mod_id: mod_id = module_name
-        mod_id = str(mod_id).strip()
+        if not mod_id:
+            continue  # 如果没有mod_id，跳过这个模块
+            
+        node_uid = f"MOD_{mod_id}_{uuid.uuid4().hex[:6]}"
+        module_id_to_node_id[mod_id] = node_uid
         
-        mermaid = module_data.get('mermaid_spec', {})
-        io_sig = module_data.get('io_signature', {})
-        raw_in = io_sig.get('input_type', '')
-        raw_out = io_sig.get('output_type', '')
+        mermaid_code = module_data.get("mermaid_def", "")
+        io_spec = module_data.get('io_spec', {})
 
-        std_in = normalize_io_type(raw_in)
-        std_out = normalize_io_type(raw_out)
-        
         mod_text = (
-            f"Module: {module_name}\n"
+            f"Module: {mod_id}\n"
+            f"Role: {module_data.get('role', 'unknown')}\n"
             f"Function: {module_data.get('function_description', '')}\n"
             f"Technical Details: {module_data.get('technical_details', '')}\n"
-            f"Input: {io_sig.get('input_type', '')}\n"
-            f"Output: {io_sig.get('output_type', '')}"
+            f"Input: {io_spec.get('in', '')}\n"
+            f"Output: {io_spec.get('out', '')}"
         )
         
         mod_metadata = {
-            "name": module_name,
+            "name": mod_id,
             "type": "MODULE",
-            "role": module_data.get('role', 'processor'),
-            "code": mermaid.get('definition_code', ''),
-            "parent_system_id": system_id,
+            "role": module_data.get('role', ''),
+            "code": mermaid_code,
             "source": file_name,
-            "std_in": std_in,
-            "std_out": std_out,
-            "raw_in": raw_in,
-            "raw_out": raw_out
         }
 
         mod_node = TextNode(
             text=mod_text, 
-            id_=mod_id, 
+            id_=node_uid, 
             metadata=mod_metadata,
             excluded_embed_metadata_keys=["code"], 
             excluded_llm_metadata_keys=[]   
         )
         nodes.append(mod_node)
-        created_node_ids.add(mod_id)
 
         relations.append(Relation(
-            source_id=system_id,
-            target_id=mod_id,
-            label="HAS_MODULE"
+            source_id=article_id,
+            target_id=node_uid,
+            label="DEFINES_MODULE"
         ))
+
+    # --- 3. 创建 Workflow 节点 ---
+    for wf_data in workflows:
+        flow_id = wf_data.get("flow_id")
+        if not flow_id:
+            continue  # 如果没有flow_id，跳过这个工作流
+            
+        wf_uid = f"WF_{flow_id}_{uuid.uuid4().hex[:6]}"
+        flow_id_to_node_id[flow_id] = wf_uid
+
+        wf_text = (
+            f"Workflow: {flow_id}\n"
+            f"Description: {wf_data.get('description', '')}\n"
+            f"Input: {wf_data.get('input', '')}\n"
+            f"Output: {wf_data.get('output', '')}"
+        )
+
+        wf_metadata = {
+            "name": flow_id,
+            "type": "WORKFLOW",
+            "source": file_name,
+            "flow_type": wf_data.get('flow_type', '')
+        }
         
-        # --- 创建 Subnodes (Components) ---
-        sub_nodes = mermaid.get("sub_nodes",[])
-        for sub in sub_nodes:
-            sub_raw_id = sub.get("node_id")
-            if not sub_raw_id: continue
+        wf_node = TextNode(
+            text=wf_text, 
+            id_=wf_uid, 
+            metadata=wf_metadata 
+        )
+        nodes.append(wf_node)
+
+        relations.append(Relation(
+            source_id=article_id,
+            target_id=wf_uid,
+            label="HAS_WORKFLOW"
+        ))
+
+    for wf_data in workflows:
+        flow_id = wf_data.get("flow_id")
+
+        wf_uid = flow_id_to_node_id.get(flow_id)
+        if not wf_uid:
+            continue  
+        
+        # workflow --> workflow (dependencies)
+        dependencies = wf_data.get("dependencies", [])
+        for dep_flow_id in dependencies:
+            target_wf_node_id = flow_id_to_node_id.get(dep_flow_id)
+            if target_wf_node_id:
+                relations.append(Relation(
+                    source_id=wf_uid,
+                    target_id=target_wf_node_id,
+                    label="DEPENDS_ON"
+                ))
+            else:
+                print(f"⚠️  Workflow {flow_id} references missing workflow with flow_id: {dep_flow_id}")
+    
+
+        # workflow --> module (module sequence)
+        seq = wf_data.get("module_seq", [])
+        for index, mod_id_ref in enumerate(seq):
+            target_mod_node_id = module_id_to_node_id.get(mod_id_ref)
+            if target_mod_node_id:
+                relations.append(Relation(
+                    source_id=wf_uid,
+                    target_id=target_mod_node_id,
+                    label="EXECUTES_STEP",
+                    properties={"step_index": index, "step_name_in_flow": mod_id_ref}
+                ))
+            else:
+                print(f"⚠️  Workflow {flow_id} references missing module: {mod_id_ref}")
+        
+    # --- 4. 创建 Module 之间的 FLOWS_TO 关系 ---
+    for mod_data in modules:
+        mod_id = mod_data.get('mod_id')
+        if not mod_id:
+            continue
             
-            sub_full_id = f"{mod_id}_{sub_raw_id}"
+        source_node_id = module_id_to_node_id.get(mod_id)
+        if not source_node_id:
+            continue  # 如果源模块不存在，跳过
             
-            # 存入查找表
-            component_lookup[sub_raw_id] = sub_full_id
-            component_to_parent_map[sub_full_id] = mod_id
-            
-            sub_text = (
-                f"Component: {sub_raw_id}\n"
-                f"Function: {sub.get('node_function','')}"
-            )
-
-            sub_metadata = {
-                "name": sub_raw_id,
-                "id": sub_raw_id,
-                "type": "COMPONENT",
-                "role": sub.get('node_role', ''),
-                "parent_module": mod_id
-            }
-
-            sub_node = TextNode(
-                text=sub_text, id_=sub_full_id, metadata=sub_metadata
-            )
-            nodes.append(sub_node)
-            created_node_ids.add(sub_full_id)
-
-            relations.append(Relation(
-                source_id=mod_id, target_id=sub_full_id, label="HAS_PART"
-            ))
-
-    # --- 3. 创建 Flow 关系 (增强版逻辑) ---
-    for module_name, module_data in modules.items():
-        mod_id = module_data.get('mod_id')
-        if not mod_id: mod_id = module_name
-        mod_id = str(mod_id).strip()
-
-        component_to_parent_map[mod_id] = mod_id
-        mermaid = module_data.get('mermaid_spec', {})
-        ports = mermaid.get('ports', {})
-        outgoing = ports.get('outgoing', [])
+        ports = mod_data.get("ports", {})
+        outgoing = ports.get("outgoing", [])
 
         for conn in outgoing:
-            target_raw_name = conn.get('target')
-            if not target_raw_name or target_raw_name == "NONE":
-                continue
-
-            # --- A. 处理源节点 (支持逗号分割) ---
-            raw_src_internal = conn.get('originates_from_internal_node')
-            source_candidates = []
-
-            if not raw_src_internal or raw_src_internal == "NONE":
-                # 默认源头是模块
-                source_candidates.append(mod_id)
-            else:
-                # 拆分逗号 (例如 "Microphone, Camera")
-                internal_parts = [p.strip() for p in raw_src_internal.split(',')]
-                
-                for p in internal_parts:
-                    # 尝试构建子节点 ID
-                    potential_sub_id = f"{mod_id}_{p}"
-                    
-                    if potential_sub_id in created_node_ids:
-                        source_candidates.append(potential_sub_id)
-                    elif p == mod_id and mod_id in created_node_ids:
-                        # 修正: 如果子节点名等于模块名 (如 Coachee), 回退到模块 ID
-                        source_candidates.append(mod_id)
-                    else:
-                        print(f"⚠️ Warning: Internal source '{p}' not found in module '{mod_id}'. Skipping this part.")
-
-            # --- B. 处理目标节点 ---
-            # 同样尝试查找 component，如果找不到则找 module
-            target_full_id = None
-            
-            if target_raw_name in component_lookup:
-                target_full_id = component_lookup[target_raw_name]
-            elif target_raw_name in created_node_ids:
-                target_full_id = target_raw_name
-            else:
-                # 如果目标真的不存在 (比如 'End'), 这里会依然跳过
-                print(f"⚠️ Warning: Target '{target_raw_name}' not found (Missing module definition?). Skipping relation.")
-                continue
-
-            # --- C. 创建所有连线 ---
-            for src_id in source_candidates:
-                if src_id in created_node_ids and target_full_id in created_node_ids: # 双重检查
-                    relations.append(Relation(
-                        source_id=src_id,
-                        target_id=target_full_id,
-                        label="FLOWS_TO",
-                        properties={"meaning": conn.get('data_flow_meaning', 'Data Flow'), "description": conn.get('edge_label', '')}
-                    ))
-
-                    parent_src = component_to_parent_map.get(src_id, src_id)
-                    parent_tgt = component_to_parent_map.get(target_full_id, target_full_id)
-
-                    if parent_src != parent_tgt:
-                        flow_key = f"{parent_src}->{parent_tgt}"
-                        relations.append(Relation(
-                            source_id=parent_src,
-                            target_id=parent_tgt,
-                            label="FLOWS_TO",
-                            properties={"type": "high_level", "generated_from": f"{src_id}->{target_full_id}"}
-                        ))
-                        existing_module_flows.add(flow_key)
+            target_mod_id = conn.get("target_mod")
+            target_mod_node_id = module_id_to_node_id.get(target_mod_id)
+            if source_node_id and target_mod_node_id:
+                relations.append(Relation(
+                    source_id=source_node_id,
+                    target_id=target_mod_node_id,
+                    label="FLOWS_TO",
+                    properties={"edge_label": conn.get("edge_label", ""), 
+                               "internal_source": conn.get("originates_from_internal_node", ""), 
+                               "target_subnode": conn.get("target_mod_internal_node", "")}
+                ))
 
     return nodes, relations
+
+
 
 def force_update_neo4j_content(nodes, graph_store):
     """

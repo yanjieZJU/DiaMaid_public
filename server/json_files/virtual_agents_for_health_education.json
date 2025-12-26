@@ -1,0 +1,150 @@
+{
+    "overview": {
+        "arch_exist": "Figure 3",
+        "full_code": "graph LR\n    subgraph Data_Collection\n        AgentInteraction[\"Agent provide basic education for users and asked questions to collect personal data during conversation\"]\n    end\n\n    subgraph Data_Processing\n        JSONStorage[\"User Responses Saved as JSON format\"]\n        PromptFormatter[\"System formats a structured prompt combining user data and standard educational content\"]\n    end\n\n    subgraph Content_Generation\n        LLMService[\"Structured Prompt is sent to OpenAI's GPT-4-turbo API for personalized content generation\"]\n    end\n\n    subgraph Output\n        PamphletDisplay[\"Tailored pamphlet displayed\"]\n    end\n\n    AgentInteraction --> JSONStorage\n    JSONStorage --> PromptFormatter\n    PromptFormatter --> LLMService\n    LLMService --> PamphletDisplay",
+        "caption": "Figure 3: This flowchart shows how a personalized health pamphlet is generated. After the user interacts with a virtual agent, their responses are saved as a JSON file, formatted into a prompt, and sent to GPT-4-Turbo to create a customized pamphlet with tailored visuals and a PDF download option."
+    },
+    "modules": {
+        "Virtual Agent Interaction": {
+            "node_id": "AgentInteraction",
+            "role": "source",
+            "function_description": "Engages the user in a dialogue to provide basic health education and collect personal information (demographics, family history, lifestyle).",
+            "technical_details": "3D-animated character rendered in real-time; simulates face-to-face dialogue with synthetic speech and synchronized nonverbal behaviors (BEAT engine); scripted using hierarchical transition networks.",
+            "io_signature": {
+                "input_type": "User interaction (multiple-choice selections)",
+                "output_type": "User dialogue data"
+            },
+            "mermaid_spec": {
+                "definition_code": "AgentInteraction[\"Agent provide basic education for users and asked questions to collect personal data during conversation\"]",
+                "ports": {
+                    "incoming": [],
+                    "outgoing": [
+                        {
+                            "target": "JSONStorage",
+                            "originates_from_internal_node": "NONE",
+                            "data_flow_meaning": "Collected user data",
+                            "edge_label": "NONE"
+                        }
+                    ]
+                }
+            }
+        },
+        "Data Serialization": {
+            "node_id": "JSONStorage",
+            "role": "processor",
+            "function_description": "Saves the user responses collected during the agent interaction into a structured format.",
+            "technical_details": "Exports user dialogue data as a JSON file containing responses to tailoring questions.",
+            "io_signature": {
+                "input_type": "User dialogue data",
+                "output_type": "JSON file"
+            },
+            "mermaid_spec": {
+                "definition_code": "JSONStorage[\"User Responses Saved as JSON format\"]",
+                "ports": {
+                    "incoming": [
+                        {
+                            "source": "AgentInteraction",
+                            "connects_to_internal_node": "NONE",
+                            "data_flow_meaning": "Raw user responses",
+                            "edge_label": "NONE"
+                        }
+                    ],
+                    "outgoing": [
+                        {
+                            "target": "PromptFormatter",
+                            "originates_from_internal_node": "NONE",
+                            "data_flow_meaning": "Structured user data",
+                            "edge_label": "NONE"
+                        }
+                    ]
+                }
+            }
+        },
+        "Prompt Engineering System": {
+            "node_id": "PromptFormatter",
+            "role": "processor",
+            "function_description": "Constructs a structured prompt for the LLM by combining user-specific data with standardized medical content.",
+            "technical_details": "Integrates user data (from JSON) with content from the American Cancer Society's Breast Cancer Fact Sheet to ensure clinical accuracy while enabling personalization.",
+            "io_signature": {
+                "input_type": "JSON data, Standard educational content",
+                "output_type": "Structured LLM prompt"
+            },
+            "mermaid_spec": {
+                "definition_code": "PromptFormatter[\"System formats a structured prompt combining user data and standard educational content\"]",
+                "ports": {
+                    "incoming": [
+                        {
+                            "source": "JSONStorage",
+                            "connects_to_internal_node": "NONE",
+                            "data_flow_meaning": "User data",
+                            "edge_label": "NONE"
+                        }
+                    ],
+                    "outgoing": [
+                        {
+                            "target": "LLMService",
+                            "originates_from_internal_node": "NONE",
+                            "data_flow_meaning": "Formatted prompt",
+                            "edge_label": "NONE"
+                        }
+                    ]
+                }
+            }
+        },
+        "LLM Content Generation": {
+            "node_id": "LLMService",
+            "role": "processor",
+            "function_description": "Generates the personalized text for the health pamphlet based on the provided prompt.",
+            "technical_details": "Uses OpenAI's GPT-4-Turbo API; adapts messaging based on sociodemographic characteristics and risk factors; preserves original fact sheet structure but dynamically adjusts content.",
+            "io_signature": {
+                "input_type": "Structured prompt",
+                "output_type": "Customized pamphlet text"
+            },
+            "mermaid_spec": {
+                "definition_code": "LLMService[\"Structured Prompt is sent to OpenAI's GPT-4-turbo API for personalized content generation\"]",
+                "ports": {
+                    "incoming": [
+                        {
+                            "source": "PromptFormatter",
+                            "connects_to_internal_node": "NONE",
+                            "data_flow_meaning": "Prompt with instructions and data",
+                            "edge_label": "NONE"
+                        }
+                    ],
+                    "outgoing": [
+                        {
+                            "target": "PamphletDisplay",
+                            "originates_from_internal_node": "NONE",
+                            "data_flow_meaning": "Generated text content",
+                            "edge_label": "NONE"
+                        }
+                    ]
+                }
+            }
+        },
+        "Pamphlet Rendering": {
+            "node_id": "PamphletDisplay",
+            "role": "sink",
+            "function_description": "Compiles the generated text and appropriate visuals into a final digital pamphlet for the user.",
+            "technical_details": "Incorporates the user's name; selects visual figures to reflect the user's stated racial or ethnic background; provides a PDF download option.",
+            "io_signature": {
+                "input_type": "Customized text, User demographic data (for visuals)",
+                "output_type": "Digital pamphlet (PDF/Screen)"
+            },
+            "mermaid_spec": {
+                "definition_code": "PamphletDisplay[\"Tailored pamphlet displayed\"]",
+                "ports": {
+                    "incoming": [
+                        {
+                            "source": "LLMService",
+                            "connects_to_internal_node": "NONE",
+                            "data_flow_meaning": "Personalized content",
+                            "edge_label": "NONE"
+                        }
+                    ],
+                    "outgoing": []
+                }
+            }
+        }
+    }
+}

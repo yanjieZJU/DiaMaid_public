@@ -27,17 +27,17 @@ class PlannerAgent:
     def plan_system_architecture(self, user_query):
         prompt = f"""
         You are a system architect and requirement analyst.
-        Your task is to decompose the user query into a series of functional requirements and technical constraints.
-        DO NOT name specific technologies.
-        DO NOT create a final architecture.
+        ## Task
+        1. Identify mandatory components (anchors) from user query.
+        2. For each anchor, generate 3-5 technical synonyms commonly found in academic papers (HCI/CS domain).
+            
         Output Structure (in JSON format)
         {{
-            "overall_description": "How you plan to architect this system/pipeline?",
-            "details": [
+            "design_goal": "...",
+            "anchors": [
                 {{
-                    "name": "the name of this step",
-                    "goal": "the goal of this step",
-                    "required_inputs": "the required input type for this step. Only choose from {STANDARD_IO_MAP}",
+                    "user_term": "the user term for this anchor, e.g., AI tutor",
+                    "aliases": "the alias of this anchor, use array. e.g., ["conversational agent", "chatbot"]",
                 }}
             ]
         }}
@@ -62,41 +62,140 @@ class PlannerAgent:
             print("Failed to parse JSON response.")
             return None
         
+    def generalize_domain(self, query):
+        prompt = f"""
+        You're going to analyze the user query and generalize the structure/domain of the query.
+        e.g., history education system --> education system/interactive learning system
+        User Query: {query}
+    """
+        try:
+            response = self.client.chat.completions.create(
+                model="gpt-4o",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.7,
+            ).choices[0].message.content
+            return response
+        except Exception as e:
+            print(f"Error: {e}")
+            return None
+        
+        
         
 class RetrieverAgent:
-    def __init__(self, vector_store, graph_store):
+    def __init__(self, vector_store, graph_store, client):
         self.vector_store = vector_store
         self.graph_store = graph_store
+        self.client = client
 
-    def retrieve_for_module(self, module_info, top_k=1):
-        query_text = f"{module_info['goal']}"
-        in_type = module_info.get('required_inputs', '')
+    def retrieve_for_module(self, anchors_list, top_k=3):
+
+        ref_nodes = []
+        for anchor in anchors_list:
+            user_term = anchor["user_term"]
+            aliases = anchor["aliases"]
+            query_text = f"{user_term} or {' or '.join(aliases)}"
+        
+            retrieved_nodes = retrieve_and_get_content(
+                query_text, 
+                self.vector_store, 
+                self.graph_store, 
+                top_k,
+                node_type="MODULE",
+                in_type=None
+            )
+        ref_nodes.extend(retrieved_nodes)
+
+        for n in ref_nodes:
+            print(n.node.text)
+            print(n.node.metadata.get("topology", "N/A"))
+            print(n.score)
+        # for node_with_score in retrieved_nodes:
+        #     if node_with_score.score >= 0.7:
+        #         valid_nodes.append(node_with_score.node)
+
+        return ref_nodes
+    
+    def retrieve_for_skeleton(self, design_goal, threshold=0.5):
+        query_text = f"{design_goal}"
         retrieved_nodes = retrieve_and_get_content(
             query_text, 
             self.vector_store, 
             self.graph_store, 
-            top_k,
-            in_type=in_type
+            top_k=10,
+            node_type="WORKFLOW",
         )
+        valid_nodes = []
+        # for node_with_score in retrieved_nodes:
+        #     if node_with_score.score >= threshold:
+        #         valid_nodes.append(node_with_score.node)
         return retrieved_nodes
+    
+    def rerank_with_llm(self, query, retrieved_skeletons):
+        if not retrieved_skeletons: return []
+        candidates_text = ""
+        for i, node in enumerate(retrieved_skeletons):
+            content_preview = node.node.text[:500].replace("\n", " ")
+            candidates_text += f"--- Candidate {i} ---\n {content_preview}\n\n"
+        prompt = f"""
+        ##TASK:
+        Identify the SINGLE candidate from the list below that BEST matches the user's specific requirements.
+
+        ##CRITERIA:
+        1. The candidate must be the most relevant to the user's requirements.
+        2. The candidate must be the most complete to include the specific nodes mentioned in the user's query.
+
+        ##Candidates:
+        {candidates_text}
+
+        ##User Query:
+        {query}
+
+        ##Output Format:
+        Return the top 3 indices of the best candidates in order of preference (e.g., "1, 2, 0").
+
+        """
+        try:
+            response = self.client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0,
+            ).choices[0].message.content
+            indices = [int(x.strip()) for x in response.split(",") if x.strip().isdigit()]
+            valid_skeletons = []
+            for i in indices:
+                if 0 <= i < len(retrieved_skeletons):
+                    valid_skeletons.append(retrieved_skeletons[i])
+
+            if len(valid_skeletons) < 3:
+                for i in range(len(valid_skeletons)):
+                    if i not in indices and len(valid_skeletons) < 3:
+                        valid_skeletons.append(retrieved_skeletons[i])
+
+            return valid_skeletons
+            
+        except Exception as e:
+            print(f"Error: {e}")
+            return None
 
 
 class IntegratorAgent:
     def __init__(self, client):
         self.client = client
 
-    def integrate_arch(self, query, plan, retrieved_info):
+    def integrate_arch(self, query, skeletons, retrieved_info):
+        skeletons_text = ""
+        for i, s in enumerate(skeletons):
+            skeletons_text += f"--- Skeleton {i} ---\n {s.node.text}\n\n"
         prompt = f"""
         You are a professional designer and researcher in the field of HCI. Try to plan a pipeline based on the user's requirements and the retrieved information, and generate a Mermaid graph/flowchart to visualize the pipeline. 
         User Query: {query}
-        This is the user's demand, and it is the principle you should follow the most.
-
-        ## Plan
-        Overall Description: {plan["overall_description"]}
-        Details: {json.dumps(plan["details"], ensure_ascii=False, indent=2)}
-        This is an idea, which encompasses the overall description of the entire system and possible functional modules. It meets the user's requirements, but lacks feasibility and specific details.
+        This is the user's demand, and it is the principle you should follow the most. The nodes in the query must be included in the pipeline.
 
         ## Retrieved Information
+        For the entire system architecture, here is the most similar system found in the literature.
+        You can use this as a reference or skeleton to guide your design:
+        {skeletons_text}
+        \n\n
         For each conceptual step, here are real validated modules found in papers:
         {json.dumps(retrieved_info, ensure_ascii=False, indent=2)}
         They incorporate the technical methods, module architectures and data processing approaches used in other studies. 
@@ -117,7 +216,30 @@ class IntegratorAgent:
                     "name": "the module name",
                     "function": "the functions of this module",
                     "technical_methods": "the technical methods used in this module",
-                    "references": "the references of this module, e.g. [Paper X]",
+                    "references": "the code of the referenced module (if any). Use 'None' if not available.",
+                    "sub_nodes":[
+                        "<sub_node name (if any)>": {{
+                            "name": "the sub node name",
+                            "function": "the functions of this sub node",
+                            "technical_methods": "the technical methods used in this sub node",
+                        }}
+                    ],
+                    "ports": {{
+                        "incoming (if any)": [
+                            {{
+                                "source_mod": "the identifier of the incoming module",
+                                "source_node (if any)": "the identifier of the incoming node",
+                                "edge_label": "the label of the incoming edge, i.e., the meaning of the data flow",
+                            }}
+                        ],
+                        "outgoing (if any)": [
+                            {{
+                                "target_mod": "the identifier of the outgoing module",
+                                "target_node (if any)": "the identifier of the outgoing node",
+                                "edge_label": "the label of the outgoing edge, i.e., the meaning of the data flow",
+                            }}
+                        ]
+                    }}
                 }}
             ]
         }}
@@ -145,17 +267,61 @@ class DrawerAgent:
     
     def draw_flowchart(self, arch_plan):
         prompt = f"""
-        Make a flowchart for the following system architecture plan. Use Mermaid syntax.
-        {arch_plan}
-        The flowchart should be in Mermaid.js format. 
+        Make a flowchart for the given system architecture plan. Use Mermaid syntax.
+        ## The input structure:
+        {{
+            "overall_description": "...",
+            "module_details": [
+                "<module name>": {{
+                    "name": "the module name",
+                    "function": "the functions of this module",
+                    "technical_methods": "the technical methods used in this module",
+                    "references": "the definition code of this module in the reference paper.",
+                    "sub_nodes":[
+                        "<sub_node name (if any)>": {{
+                            "name": "the sub node name",
+                            "function": "the functions of this sub node",
+                            "technical_methods": "the technical methods used in this sub node",
+                        }}
+                    ],
+                    "ports": {{
+                        "incoming (if any)": [
+                            {{
+                                "source_mod": "the identifier of the incoming module",
+                                "source_node (if any)": "the identifier of the incoming node",
+                                "edge_label": "the label of the incoming edge, i.e., the meaning of the data flow",
+                            }}
+                        ],
+                        "outgoing (if any)": [
+                            {{
+                                "target_mod": "the identifier of the outgoing module",
+                                "target_node (if any)": "the identifier of the outgoing node",
+                                "edge_label": "the label of the outgoing edge, i.e., the meaning of the data flow",
+                            }}
+                        ]
+                    }}
+                }}
+            ]
+        }}
         ## CRITICAL RULES:
-            1. **Adhere strictly to the grammar of Mermaid** to ensure that it does not generate any errors when compiled. 
-            2. You need to modify the names and descriptions of each node and relationship according to the user's requirements and context, so that the user can fully understand this flowchart.
+            1. **Keep align with the plan**: The flowchart should strictly follow the plan. 
+                a. Use subgraphs to represent modules if there are more than one subnodes and data flow between them in a single module. 
+                b. The definition codes within the module are included in the "references" section, which should be contained in the code of the module (subgraph) if necessary.
+                c. The connection and data flow between nodes/modules should display through the label on the connection line.
+                d. Do not add any extra nodes or edges.
+            2. **Adhere strictly to the grammar of Mermaid**: ensure the final code does not generate any errors when compiled. 
+                a. Always enclose the labels with double quatation marks.
+                b. Do not include style attributes.
+            3. **Use the code in the reference with caution.** Modify the names and descriptions of each node and relationship according to the user's requirements and context, so that the user can fully understand this flowchart.
+
         
         Final Output Structure (in JSON format)
         {{
             "mermaid_code": "...",
         }}
+
+        ## The input plan:
+        {arch_plan}
     """
         try: 
             response = self.client.chat.completions.create(
@@ -187,46 +353,50 @@ class DrawerAgent:
         
         return code
             
-def main():
+def run_pipeline(user_query):
     vector_store, graph_store = load_stores()
     planner = PlannerAgent(client)
-    retriever = RetrieverAgent(vector_store, graph_store)
+    retriever = RetrieverAgent(vector_store, graph_store, client)
     integrator = IntegratorAgent(client)
     drawer = DrawerAgent(client)
-
-    user_query = "design a history education system based on LLM"
-
-    # 1. Plan System Architecture
     arch_plan = planner.plan_system_architecture(user_query)
-    if arch_plan:
-        print("System Architecture Plan:")
-        print(json.dumps(arch_plan, indent=2))
-    else:
-        print("Failed to generate system architecture plan.")
-        return
+    print(arch_plan)
+    skeletons = retriever.retrieve_for_skeleton(arch_plan["design_goal"])
+    filtered_skeletons = retriever.rerank_with_llm(user_query, skeletons)
     
-    retrieved_info = {}
-    for i, module in enumerate(arch_plan["details"]):
-        nodes = retriever.retrieve_for_module(module)
-        retrieved_info[module["name"]] = [{
-            'id': node.node.id_,
-            'text': node.node.text,
-            'code': node.node.metadata.get("code", ""),
-            'score': node.score
-        } for node in nodes]
+    for i, s in enumerate(filtered_skeletons):
+        print(f"--- Skeleton {i} ---\n {s.node.text}\n\n")
 
-        print(f"Retrieved {len(nodes)} relevant nodes for module {module['name']}")
-
-    print("Retrieval finished. Retrieved Info:")
-    print(json.dumps(retrieved_info, indent=2))
-
-    arch = integrator.integrate_arch(query=user_query, plan=arch_plan, retrieved_info=retrieved_info)
-    mermaid_code = drawer.draw_flowchart(arch)
+    ref_nodes = retriever.retrieve_for_module(arch_plan["anchors"])
+    ref_info = {}
+    for anchor in arch_plan["anchors"]:
+        anchor_name = anchor["user_term"]
+        anchor_nodes = []
+        for node_with_score in ref_nodes:
+            node = node_with_score.node
+            if anchor_name.lower() in node.text.lower() or any(alias.lower() in node.text.lower() for alias in anchor["aliases"]):
+                anchor_nodes.append({
+                    'id': node.id_,
+                    'text': node.text,
+                    'code': node.metadata.get("code", ""),
+                    'score': node_with_score.score,
+                    'metadata': dict(node.metadata)
+                })
+        if anchor_nodes:
+            ref_info[anchor_name] = anchor_nodes
+    new_arch = integrator.integrate_arch(query=user_query, skeletons=filtered_skeletons, retrieved_info=ref_info)
+    mermaid_code = drawer.draw_flowchart(new_arch)
     print(mermaid_code)
+    return mermaid_code
 
 if __name__ == "__main__":
-    main()
+    query = "design a history education system based on LLM. Nodes: graph TD; LLM;\n Virtual Reality;"
+    run_pipeline(query)
+    # vector_store, graph_store = load_stores()
     # planner = PlannerAgent(client)
-    # user_query = "design a history education system based on LLM"
-    # arch_plan = planner.plan_system_architecture(user_query)
-    # print(arch_plan)
+    # retriever = RetrieverAgent(vector_store, graph_store, client)
+    # query = "design a history education system based on LLM. Nodes: graph TD; LLM;\n Virtual Reality;"
+    # arch_plan = planner.plan_system_architecture(query)
+    # skeletons = retriever.retrieve_for_skeleton(arch_plan["design_goal"])
+    # best_skeleton = retriever.rerank_with_llm(query, skeletons)
+    # print(best_skeleton.node.text)

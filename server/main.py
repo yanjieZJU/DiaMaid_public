@@ -4,17 +4,18 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 from openai import OpenAI
+import uvicorn
+from agents import run_pipeline
 
 API_KEY = "sk-y44HwiOqlzdvdMwiVGmyzpITjGQdkwWS0bJuDMWN2awpHnX7" 
 API_BASE = "https://poloai.top/v1"
 
 app = FastAPI()
 
-# --- 1. 配置 CORS (跨域资源共享) ---
-# 允许前端 (通常是 http://localhost:5173) 访问此后端
+# --- CORS Setting ---
 origins = [
     "http://localhost:5173",
-    "http://127.0.0.1:5173",
+    "[http://127.0.0.1:5173](http://127.0.0.1:5173)",
 ]
 
 app.add_middleware(
@@ -25,10 +26,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- 2. 配置 LLM 客户端 ---
-# 请替换为你自己的 API Key 和 Base URL
-# 如果使用 OpenAI，不需要修改 base_url
-# 如果使用 DeepSeek, Moonshot 等，请修改对应的 base_url
+# --- LLM Client Setting ---
 client = OpenAI(api_key=API_KEY, base_url=API_BASE)
 
 # --- 3. 定义请求数据格式 ---
@@ -54,29 +52,13 @@ async def generate_mermaid(req: GenRequest):
     """
 
     user_message = f"""
-    场景描述: {req.prompt}
-    必须包含的节点: {", ".join(req.userNodes)}
+    user query: {req.prompt}
+    Nodes should be included: {", ".join(req.userNodes)}
     """
 
     try:
-        response = client.chat.completions.create(
-            model="gpt-4o", # 或者 "deepseek-chat" 等
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_message}
-            ],
-            temperature=0.7,
-        )
-        
-        content = response.choices[0].message.content.strip()
-        
-        # 清洗数据：防止 LLM 还是返回了 Markdown 代码块符号
-        if content.startswith("```mermaid"):
-            content = content.replace("```mermaid", "").replace("```", "")
-        elif content.startswith("```"):
-            content = content.replace("```", "")
-            
-        return {"code": content.strip()}
+        generated_code = run_pipeline(user_message)
+        return {"code": generated_code}
 
     except Exception as e:
         print(f"LLM 调用出错: {e}")

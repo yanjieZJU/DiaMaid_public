@@ -35,17 +35,19 @@ def load_stores():
         exit(1)
     return vector_store, graph_store
 
-def custom_retrieve(query_text, vector_store, graph_store, top_k=5, in_type_filter=None):
+def custom_retrieve(query_text, vector_store, graph_store, top_k=5, node_type=None, in_type_filter=None):
     print(f"\n🔍 Executing Custom Retrieval for: '{query_text}'")
     
     embed_model = OpenAIEmbedding(model_name="text-embedding-3-small")
     query_embedding = embed_model.get_query_embedding(query_text)
 
-    filter_list = [ExactMatchFilter(key="type", value="MODULE")]
+    filter_list = []
+    if node_type:
+        filter_list.append(ExactMatchFilter(key="type", value=node_type))
     if in_type_filter:
         filter_list.append(ExactMatchFilter(key="std_in", value=in_type_filter))
 
-    filters = MetadataFilters(filters=filter_list)
+    filters = MetadataFilters(filters=filter_list) if filter_list else None
     
     query_obj = VectorStoreQuery(
         query_embedding=query_embedding,
@@ -62,64 +64,105 @@ def custom_retrieve(query_text, vector_store, graph_store, top_k=5, in_type_filt
     retrieved_nodes = []
     with graph_store._driver.session() as session:
         for node_id, score in zip(found_ids, found_scores):
-            # 修正查询: 匹配任何标签，只要ID对上
             cypher = """
             MATCH (center:LlamaNode) WHERE center.id = $id 
-            OPTIONAL MATCH (sys:LlamaNode {type: 'SYSTEM'})-[:HAS_MODULE]->(center) // origin
-            OPTIONAL MATCH (prev:LlamaNode)-[:FLOWS_TO]->(center) // upstream
-            OPTIONAL MATCH (center)-[:FLOWS_TO]->(next:LlamaNode) // downstream
+            WITH center
+            OPTIONAL MATCH (center)-[r:FLOWS_TO]->(next:LlamaNode)
+            WITH center, collect(distinct {name: next.name, id: next.id, function: next.text, code: next.code, edge_label:r.edge_label, properties: properties(r)}) as downstreams
+            OPTIONAL MATCH (prev:LlamaNode)-[r:FLOWS_TO]->(center)
+            WITH center, downstreams, collect(distinct {name: prev.name, id: prev.id, function: prev.text, code: prev.code, edge_label:r.edge_label, properties: properties(r)}) as upstreams   
+            // 如果是WORKFLOW节点，获取依赖的工作流
+            OPTIONAL MATCH (center)-[:DEPENDS_ON]->(dep_wf:LlamaNode)
+            WITH center, upstreams, downstreams, collect(distinct {name: dep_wf.name, id: dep_wf.id, function: dep_wf.text, code: dep_wf.code}) as dependencies
+            // 获取源文件信息
             RETURN 
-                center, sys.file_name as source_file, sys.text as system_context,
-                collect(distinct {name: prev.name, id: prev.id, function: prev.text, code: prev.code}) as upstreams,
-                collect(distinct {name: next.name, id: next.id, function: next.text, code: next.code}) as downsteams
+                center, 
+                center.source as source_file,
+                upstreams,
+                downstreams,
+                dependencies
             """
             result = session.run(cypher, id=node_id).single()
             
             if result:
                 center_node = result["center"]
-                source_file = result.get("source_file") or center_node.get("source_file")
+                source_file = result.get("source_file")
                 upstreams = result["upstreams"]
-                downstreams = result["downsteams"]
-                enriched_text = (
-                    f"Module: {center_node.get('name')}\n"
-                    f"Source: {source_file}\n"
-                    f"Text content: {center_node.get('text')}\n"
-                    f"--- Context ---\n"
-                    f"Typically Proceded By: {[u['name'] for u in upstreams]}\n"
-                    f"Typically Followed By: {[d['name'] for d in downstreams]}\n"
-                )
+                downstreams = result["downstreams"]
+                dependencies = result["dependencies"]
                 
-                # Reconstruct node
-                node = TextNode(text=enriched_text, id_=center_node["id"])
+                node_type = center_node.get("type")
+                node = TextNode(text=center_node.get("text", ''), id_=center_node["id"])
                 node.metadata = dict(center_node)
                 node.metadata["topology"] = {
                     "upstream": upstreams,
                     "downstream": downstreams,
+                    "dependencies": dependencies,
                     "source_file": source_file,
                 }
+
                 retrieved_nodes.append(NodeWithScore(node=node, score=score))
+
             else:
                 print(f"   ❌ ID {node_id} NOT FOUND in Neo4j. (This should not happen with MERGE)")
 
     return retrieved_nodes
 
-def retrieve_and_get_content(query, vector_store=None, graph_store=None, top_k=5, in_type=None):
+def retrieve_and_get_content(query, vector_store=None, graph_store=None, top_k=5, node_type=None, in_type=None):
     if vector_store is None or graph_store is None:
         vector_store, graph_store = load_stores()
 
-    retrieved_nodes = custom_retrieve(query, vector_store, graph_store, top_k, in_type)
-    return retrieved_nodes
+    retrieved_nodes = custom_retrieve(query, vector_store, graph_store, top_k, node_type, in_type)
+    processed_nodes = []
+    for node_with_score in retrieved_nodes:
+        node = node_with_score.node
+        score = node_with_score.score
+        node_type = node.metadata.get("type")
+
+        if node_type == "WORKFLOW":
+            topology = node.metadata.get("topology")
+            enriched_text = (
+                f"Workflow: {node.metadata.get('name')}\n"
+                f"Description: {node.metadata.get('text')}\n"
+                f"Source: {node.metadata.get('source')}\n"
+                f"--- Dependencies ---\n"
+                f"Depends on {[d['name'] for d in topology.get("dependencies", []) if d['name']]}"
+            )
+        elif node_type == "MODULE":
+            topology = node.metadata.get("topology")
+            upstreams = topology.get("upstream", [])
+            downstreams = topology.get("downstream", [])
+            enriched_text = (
+                f"Module: {node.metadata.get('name')}\n"
+                f"Source: {node.metadata.get('source')}\n"
+                f"Text content: {node.metadata.get('text')}\n"
+                f"--- Context ---\n"
+                f"Proceded By: {[u['name'] for u in upstreams]}\n"
+                f"Followed By: {[d['name'] for d in downstreams]}\n"
+            )
+        else:
+            enriched_text = (
+                f"Article: {node.metadata.get('name')}\n"
+                f"Text Conent: {node.metadata.get('text')}\n"
+            )
+        # Reconstruct node
+        new_node = TextNode(text=enriched_text, id_=node.node_id)
+        new_node.metadata = node.metadata
+        processed_nodes.append(NodeWithScore(node=new_node, score=score))
+
+    return processed_nodes
 
 
 if __name__ == "__main__":
     vector_store, graph_store = load_stores()
-    query = "Module: Content Generation Module\n Function: Creates accurate, comprehensive, and contextually rich history content tailored to the user's level, interests, and learning goals"
+    query = "The query is routed to the appropriate category manager, which then provides an answer using its knowledge base. If the query doesn't fit a category, a fine-tuned model generates the answer."
     
-    retrieved_nodes = custom_retrieve(query, vector_store, graph_store, in_type_filter="text")
+    retrieved_nodes = retrieve_and_get_content(query, vector_store, graph_store, top_k=5, node_type="WORKFLOW", in_type=None)
 
     print("\n" + "="*50)
     print(f"✅ Found {len(retrieved_nodes)} nodes with content.")
     for n in retrieved_nodes:
         print(n.node.text)
         print(n.node.metadata.get("topology", "N/A"))
+        print(n.score)
     print("="*50 + "\n")

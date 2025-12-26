@@ -1,0 +1,219 @@
+{
+    "overview": {
+        "arch_exist": "Figure 3",
+        "full_code": "graph TD\n subgraph Prompt_Chains\n UserMessage[\"User Message\"] --> DialogueStateManager[\"Dialogue State Manager\"]\n DialogueStateManager -- \"advance state? yes/no\" --> DialogueState[\"Dialogue State\"]\n DialogueState --> StrategyPrediction[\"Strategy Prediction\"]\n StrategyPrediction --> MIStrategy[\"MI Strategy\"]\n MIStrategy --> ResponseGeneration[\"Response Generation\"]\n ResponseGeneration --> IsToolCall{\"Is the response a tool call?\"}\n IsToolCall -- yes --> ExecuteToolCall[\"Execute Tool Call\"]\n IsToolCall -- no --> ToolCallPrediction[\"Tool Call Prediction\"]\n ToolCallPrediction -- \"don't use tool\" --> AgentResponse[\"Agent Response\"]\n ToolCallPrediction -- \"use tool\" --> ToolCallGeneration[\"Tool Call Generation\"]\n ToolCallGeneration --> ToolCallCode[\"Tool Call (code)\"]\n ToolCallCode --> ExecuteToolCall\n ExecuteToolCall --> ToolOutputText[\"Tool Output (text)\"]\n ToolOutputText --> ResponseGeneration\n end",
+        "caption": "Overview and a walkthrough of GPTCoach’s Prompt Chains. (A) On the left, we show an overview of the prompt chains, in which the first chain manages the dialogue state, the second chain grounds the model’s response in MI strategies, and the third chain determines whether the response should be augmented with health data."
+    },
+    "modules": {
+        "Dialogue State Manager": {
+            "node_id": "DialogueStateManager",
+            "role": "control",
+            "function_description": "Manages the progression of the conversation by classifying whether the current coaching task is completed and determining the current dialogue state.",
+            "technical_details": "Uses a prompt chain to classify if the agent has successfully completed the task associated with the current state (e.g., onboarding, goal setting). If complete, it advances to the next state.",
+            "io_signature": {
+                "input_type": "unstructured text (User Message)",
+                "output_type": "state label (Dialogue State)"
+            },
+            "mermaid_spec": {
+                "definition_code": "DialogueStateManager[\"Dialogue State Manager\"]",
+                "ports": {
+                    "incoming": [
+                        {
+                            "source": "UserMessage",
+                            "connects_to_internal_node": "NONE",
+                            "data_flow_meaning": "Input message from the user",
+                            "edge_label": "NONE"
+                        }
+                    ],
+                    "outgoing": [
+                        {
+                            "target": "StrategyPrediction",
+                            "originates_from_internal_node": "NONE",
+                            "data_flow_meaning": "Current conversation state",
+                            "edge_label": "advance state? yes/no"
+                        }
+                    ]
+                }
+            }
+        },
+        "Strategy Prediction": {
+            "node_id": "StrategyPrediction",
+            "role": "processor",
+            "function_description": "Selects an appropriate Motivational Interviewing (MI) strategy to guide the agent's response based on the current dialogue state.",
+            "technical_details": "Selects from 11 MI strategies (e.g., Affirm, Open Question, Reflect) adapted from the Motivational Interviewing Skills Code (MISC). Conditioned on dialogue state and history.",
+            "io_signature": {
+                "input_type": "state label (Dialogue State)",
+                "output_type": "categorical label (MI Strategy)"
+            },
+            "mermaid_spec": {
+                "definition_code": "StrategyPrediction[\"Strategy Prediction\"]",
+                "ports": {
+                    "incoming": [
+                        {
+                            "source": "DialogueStateManager",
+                            "connects_to_internal_node": "NONE",
+                            "data_flow_meaning": "Current dialogue state context",
+                            "edge_label": "NONE"
+                        }
+                    ],
+                    "outgoing": [
+                        {
+                            "target": "ResponseGeneration",
+                            "originates_from_internal_node": "NONE",
+                            "data_flow_meaning": "Selected MI strategy",
+                            "edge_label": "NONE"
+                        }
+                    ]
+                }
+            }
+        },
+        "Response Generation": {
+            "node_id": "ResponseGeneration",
+            "role": "processor",
+            "function_description": "Generates the text response or tool call for the user, adhering to the selected MI strategy and incorporating any tool outputs.",
+            "technical_details": "Uses the selected MI strategy to ground the response. Can directly generate tool calls or text. Receives feedback from tool execution to refine responses.",
+            "io_signature": {
+                "input_type": "categorical label (MI Strategy), unstructured text (Tool Output)",
+                "output_type": "unstructured text (Response) or code (Tool Call)"
+            },
+            "mermaid_spec": {
+                "definition_code": "ResponseGeneration[\"Response Generation\"]",
+                "ports": {
+                    "incoming": [
+                        {
+                            "source": "StrategyPrediction",
+                            "connects_to_internal_node": "NONE",
+                            "data_flow_meaning": "Guidance on response strategy",
+                            "edge_label": "NONE"
+                        },
+                        {
+                            "source": "ExecuteToolCall",
+                            "connects_to_internal_node": "NONE",
+                            "data_flow_meaning": "Data summary from tool execution",
+                            "edge_label": "Tool Output (text)"
+                        }
+                    ],
+                    "outgoing": [
+                        {
+                            "target": "ToolCallPrediction",
+                            "originates_from_internal_node": "NONE",
+                            "data_flow_meaning": "Generated response (if not a tool call)",
+                            "edge_label": "no"
+                        },
+                        {
+                            "target": "ExecuteToolCall",
+                            "originates_from_internal_node": "NONE",
+                            "data_flow_meaning": "Generated tool call (if present)",
+                            "edge_label": "yes"
+                        }
+                    ]
+                }
+            }
+        },
+        "Tool Call Prediction": {
+            "node_id": "ToolCallPrediction",
+            "role": "control",
+            "function_description": "Determines whether the agent's response should be augmented with health data if a tool call was not initially generated.",
+            "technical_details": "An additional agent prompt that checks if the response could be improved with data (e.g., 'visualize' or 'describe' functions). Acts as a safeguard to ensure data usage.",
+            "io_signature": {
+                "input_type": "unstructured text (Initial Response)",
+                "output_type": "binary decision (Use Tool / Don't Use Tool)"
+            },
+            "mermaid_spec": {
+                "definition_code": "ToolCallPrediction[\"Tool Call Prediction\"]",
+                "ports": {
+                    "incoming": [
+                        {
+                            "source": "ResponseGeneration",
+                            "connects_to_internal_node": "NONE",
+                            "data_flow_meaning": "Initial generated response",
+                            "edge_label": "no (Is the response a tool call?)"
+                        }
+                    ],
+                    "outgoing": [
+                        {
+                            "target": "ToolCallGeneration",
+                            "originates_from_internal_node": "NONE",
+                            "data_flow_meaning": "Decision to augment with data",
+                            "edge_label": "use tool"
+                        },
+                        {
+                            "target": "AgentResponse",
+                            "originates_from_internal_node": "NONE",
+                            "data_flow_meaning": "Final response without data",
+                            "edge_label": "don't use tool"
+                        }
+                    ]
+                }
+            }
+        },
+        "Tool Call Generation": {
+            "node_id": "ToolCallGeneration",
+            "role": "processor",
+            "function_description": "Generates the specific code for the tool call if the prediction step determines it is necessary.",
+            "technical_details": "Forces the model to generate an output that calls the 'visualize' or 'describe' function to fetch health data.",
+            "io_signature": {
+                "input_type": "decision signal",
+                "output_type": "code (Tool Call)"
+            },
+            "mermaid_spec": {
+                "definition_code": "ToolCallGeneration[\"Tool Call Generation\"]",
+                "ports": {
+                    "incoming": [
+                        {
+                            "source": "ToolCallPrediction",
+                            "connects_to_internal_node": "NONE",
+                            "data_flow_meaning": "Signal to generate tool call",
+                            "edge_label": "use tool"
+                        }
+                    ],
+                    "outgoing": [
+                        {
+                            "target": "ExecuteToolCall",
+                            "originates_from_internal_node": "NONE",
+                            "data_flow_meaning": "Generated function call code",
+                            "edge_label": "Tool Call (code)"
+                        }
+                    ]
+                }
+            }
+        },
+        "Execute Tool Call": {
+            "node_id": "ExecuteToolCall",
+            "role": "processor",
+            "function_description": "Executes the generated tool call (function) to fetch and process health data.",
+            "technical_details": "Interacts with the backend/database to retrieve health metrics (e.g., step count) and generates a text summary and/or visualization.",
+            "io_signature": {
+                "input_type": "code (Tool Call)",
+                "output_type": "unstructured text (Tool Output)"
+            },
+            "mermaid_spec": {
+                "definition_code": "ExecuteToolCall[\"Execute Tool Call\"]",
+                "ports": {
+                    "incoming": [
+                        {
+                            "source": "ResponseGeneration",
+                            "connects_to_internal_node": "NONE",
+                            "data_flow_meaning": "Direct tool call from generation",
+                            "edge_label": "yes"
+                        },
+                        {
+                            "source": "ToolCallGeneration",
+                            "connects_to_internal_node": "NONE",
+                            "data_flow_meaning": "Generated tool call from prediction chain",
+                            "edge_label": "Tool Call (code)"
+                        }
+                    ],
+                    "outgoing": [
+                        {
+                            "target": "ResponseGeneration",
+                            "originates_from_internal_node": "NONE",
+                            "data_flow_meaning": "Data summary text",
+                            "edge_label": "Tool Output (text)"
+                        }
+                    ]
+                }
+            }
+        }
+    }
+}

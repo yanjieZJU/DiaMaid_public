@@ -1,0 +1,113 @@
+{
+    "overview": {
+        "arch_exist": "Figure 1",
+        "full_code": "graph TD\n    subgraph Conversation\n        SpeechInput[\"Speech Input\"] --> SpeechToText[\"Speech To Text\"]\n        SpeechToText --> ModelProcessing[\"Model Processing\"]\n        ModelProcessing --> ReturnText[\"Return Text\"]\n        ReturnText --> TextToSpeech[\"Text To Speech\"]\n        TextToSpeech --> LipSync[\"Lip Sync\"]\n        LocationTag[\"Location Tag\"] --> ModelProcessing\n        BackgroundKnowledge[\"Background Knowledge\"] --> ModelProcessing\n        SceneDescription[\"Scene Description\"] --> ModelProcessing\n    end\n\n    subgraph Adaptive_Role_Switching\n        ModelClassification1[\"Model Classification\"] --> ConfirmRole[\"Confirm Role\"]\n        ConfirmRole --> SwitchTone[\"Switch Tone\"]\n        ConfirmRole --> SwitchVoice[\"Switch Voice\"]\n        ConfirmRole --> SwitchAppearance[\"Switch Appearance\"]\n        RoleDescription[\"Role Description\"] --> ModelClassification1\n    end\n\n    subgraph Adaptive_Action_Switching\n        ModelClassification2[\"Model Classification\"] --> ConfirmAction[\"Confirm Action\"]\n        ConfirmAction --> SwitchAction[\"Switch Action\"]\n        ActionDescription[\"Action Description\"] --> ModelClassification2\n    end\n\n    SpeechToText --> ModelClassification1\n    ReturnText --> ModelClassification2\n    SwitchTone --> ModelProcessing\n    SwitchVoice --> TextToSpeech\n    SwitchAppearance --> LipSync\n    SwitchAction --> LipSync",
+        "caption": "Figure 1: Prototype overview. Prototype structure for VR learning of the Pavilion of Prince Teng with PAs. For adaptive role-switching, the system switches roles based on user input, including voice, tone, and the appearance of the agents. For adaptive action-switching, the system determines and displays appropriate actions based on model output."
+    },
+    "modules": {
+        "Conversation Module": {
+            "node_id": "Conversation",
+            "role": "processor",
+            "function_description": "Handles the core conversational interaction between the user and the pedagogical agent, including speech processing and response generation.",
+            "technical_details": "Uses OpenAI Whisper for speech-to-text, GPT-4o for model processing, and Microsoft Azure API for text-to-speech. Integrates location, background knowledge, and scene description.",
+            "io_signature": {
+                "input_type": "Speech (user input), Contextual data (location, background, scene)",
+                "output_type": "Speech (agent response), Lip sync data"
+            },
+            "mermaid_spec": {
+                "definition_code": "subgraph Conversation\n    SpeechInput[\"Speech Input\"] --> SpeechToText[\"Speech To Text\"]\n    SpeechToText --> ModelProcessing[\"Model Processing\"]\n    ModelProcessing --> ReturnText[\"Return Text\"]\n    ReturnText --> TextToSpeech[\"Text To Speech\"]\n    TextToSpeech --> LipSync[\"Lip Sync\"]\n    LocationTag[\"Location Tag\"] --> ModelProcessing\n    BackgroundKnowledge[\"Background Knowledge\"] --> ModelProcessing\n    SceneDescription[\"Scene Description\"] --> ModelProcessing\nend",
+                "ports": {
+                    "incoming": [],
+                    "outgoing": [
+                        {
+                            "target": "Adaptive_Role_Switching",
+                            "originates_from_internal_node": "SpeechToText",
+                            "data_flow_meaning": "Transcribed user input for role determination",
+                            "edge_label": "NONE"
+                        },
+                        {
+                            "target": "Adaptive_Action_Switching",
+                            "originates_from_internal_node": "ReturnText",
+                            "data_flow_meaning": "Agent response text for action determination",
+                            "edge_label": "NONE"
+                        }
+                    ]
+                }
+            }
+        },
+        "Adaptive Role-Switching Module": {
+            "node_id": "Adaptive_Role_Switching",
+            "role": "control",
+            "function_description": "Dynamically selects and transitions the pedagogical agent's role based on user input and context.",
+            "technical_details": "Uses GPT-4o to classify the appropriate role (e.g., Prince Teng, Wang Bo, Archaeologist) based on user questions and role descriptions. Updates tone, voice, and appearance.",
+            "io_signature": {
+                "input_type": "Text (transcribed user input), Role descriptions",
+                "output_type": "Role configuration (Tone, Voice, Appearance)"
+            },
+            "mermaid_spec": {
+                "definition_code": "subgraph Adaptive_Role_Switching\n    ModelClassification1[\"Model Classification\"] --> ConfirmRole[\"Confirm Role\"]\n    ConfirmRole --> SwitchTone[\"Switch Tone\"]\n    ConfirmRole --> SwitchVoice[\"Switch Voice\"]\n    ConfirmRole --> SwitchAppearance[\"Switch Appearance\"]\n    RoleDescription[\"Role Description\"] --> ModelClassification1\nend",
+                "ports": {
+                    "incoming": [
+                        {
+                            "source": "Conversation",
+                            "connects_to_internal_node": "ModelClassification1",
+                            "data_flow_meaning": "Transcribed user input",
+                            "edge_label": "NONE"
+                        }
+                    ],
+                    "outgoing": [
+                        {
+                            "target": "Conversation",
+                            "originates_from_internal_node": "SwitchTone",
+                            "data_flow_meaning": "Tone configuration for response generation",
+                            "edge_label": "NONE"
+                        },
+                        {
+                            "target": "Conversation",
+                            "originates_from_internal_node": "SwitchVoice",
+                            "data_flow_meaning": "Voice configuration for TTS",
+                            "edge_label": "NONE"
+                        },
+                        {
+                            "target": "Conversation",
+                            "originates_from_internal_node": "SwitchAppearance",
+                            "data_flow_meaning": "Appearance configuration for visual rendering",
+                            "edge_label": "NONE"
+                        }
+                    ]
+                }
+            }
+        },
+        "Adaptive Action-Switching Module": {
+            "node_id": "Adaptive_Action_Switching",
+            "role": "control",
+            "function_description": "Determines and executes appropriate non-verbal actions for the pedagogical agent based on its response.",
+            "technical_details": "Uses GPT-4o to select actions (pointing, expressive, descriptive, character-specific) based on the agent's response text and action descriptions.",
+            "io_signature": {
+                "input_type": "Text (agent response), Action descriptions",
+                "output_type": "Action command"
+            },
+            "mermaid_spec": {
+                "definition_code": "subgraph Adaptive_Action_Switching\n    ModelClassification2[\"Model Classification\"] --> ConfirmAction[\"Confirm Action\"]\n    ConfirmAction --> SwitchAction[\"Switch Action\"]\n    ActionDescription[\"Action Description\"] --> ModelClassification2\nend",
+                "ports": {
+                    "incoming": [
+                        {
+                            "source": "Conversation",
+                            "connects_to_internal_node": "ModelClassification2",
+                            "data_flow_meaning": "Agent response text",
+                            "edge_label": "NONE"
+                        }
+                    ],
+                    "outgoing": [
+                        {
+                            "target": "Conversation",
+                            "originates_from_internal_node": "SwitchAction",
+                            "data_flow_meaning": "Action command for animation",
+                            "edge_label": "NONE"
+                        }
+                    ]
+                }
+            }
+        }
+    }
+}
