@@ -28,8 +28,11 @@ class PlannerAgent:
         prompt = f"""
         You are a system architect and requirement analyst.
         ## Task
-        1. Identify mandatory components (anchors) from user query.
-        2. For each anchor, generate 3-5 technical synonyms commonly found in academic papers (HCI/CS domain).
+        1. Identify mandatory components (anchors) from user query. It might involve the functions that need to be implemented, the technical modules, fixed inputs/outputs, etc.
+        2. Complete the design goal based on these anchors which were not originally included in the original query.
+        3. For each anchor:
+            a. generate 3-5 technical synonyms commonly found in academic papers (HCI/CS domain).
+            b. based on the user's requirements and the current context, infer the user's expectations for each anchor (their role within the entire workflow), and formulate a concise description.
             
         Output Structure (in JSON format)
         {{
@@ -38,6 +41,7 @@ class PlannerAgent:
                 {{
                     "user_term": "the user term for this anchor, e.g., AI tutor",
                     "aliases": "the alias of this anchor, use array. e.g., ["conversational agent", "chatbot"]",
+                    "description": "the description of this anchor, e.g., a conversational agent that can answer questions about the user's topic."
                 }}
             ]
         }}
@@ -93,7 +97,8 @@ class RetrieverAgent:
         for anchor in anchors_list:
             user_term = anchor["user_term"]
             aliases = anchor["aliases"]
-            query_text = f"{user_term} or {' or '.join(aliases)}"
+            description = anchor["description"]
+            query_text = f"{user_term}: {description}; Aliases: {' or '.join(aliases)}"
         
             retrieved_nodes = retrieve_and_get_content(
                 query_text, 
@@ -103,11 +108,11 @@ class RetrieverAgent:
                 node_type="MODULE",
                 in_type=None
             )
-        ref_nodes.extend(retrieved_nodes)
+            ref_nodes.extend(retrieved_nodes)
 
         for n in ref_nodes:
             print(n.node.text)
-            print(n.node.metadata.get("topology", "N/A"))
+            # print(n.node.metadata.get("topology", "N/A"))
             print(n.score)
         # for node_with_score in retrieved_nodes:
         #     if node_with_score.score >= 0.7:
@@ -267,7 +272,8 @@ class DrawerAgent:
     
     def draw_flowchart(self, arch_plan):
         prompt = f"""
-        Make a flowchart for the given system architecture plan. Use Mermaid syntax.
+        ## Task
+        Translate the given system architecture/pipeline into a Mermaid flowchart.
         ## The input structure:
         {{
             "overall_description": "...",
@@ -303,16 +309,23 @@ class DrawerAgent:
                 }}
             ]
         }}
-        ## CRITICAL RULES:
+        ## INTERPRETATION RULES:
             1. **Keep align with the plan**: The flowchart should strictly follow the plan. 
-                a. Use subgraphs to represent modules if there are more than one subnodes and data flow between them in a single module. 
-                b. The definition codes within the module are included in the "references" section, which should be contained in the code of the module (subgraph) if necessary.
-                c. The connection and data flow between nodes/modules should display through the label on the connection line.
-                d. Do not add any extra nodes or edges.
+                a. Nodes are only represented by their ids and names, without any other information appearing in the diagram (including functions, technical methods, and references).
+                b. Use subgraphs to represent modules if there are more than one subnodes and data flow between them in a single module. 
+                c. The definition codes within the module are included in the "references" section, which should be contained in the code of the module (subgraph) if necessary.
+                d. The connection and data flow between nodes/modules should display through the label on the connection line.
+                e. Do not add any extra nodes or edges.
             2. **Adhere strictly to the grammar of Mermaid**: ensure the final code does not generate any errors when compiled. 
                 a. Always enclose the labels with double quatation marks.
                 b. Do not include style attributes.
             3. **Use the code in the reference with caution.** Modify the names and descriptions of each node and relationship according to the user's requirements and context, so that the user can fully understand this flowchart.
+
+        ## REFLECTION:
+        Before outputting the final code, please reflect and recheck the code.
+        1. The **subgraph** has been correctly defined and an end marker "end" has been added.
+        2. The name of each node (enclosed in parentheses or squares brackets) do not contain any other parentheses or brackets, or are correctly enclosed within double quotes.
+        3. NO style attributes, NO "click" events, NO "class" identification.
 
         
         Final Output Structure (in JSON format)
@@ -341,15 +354,22 @@ class DrawerAgent:
         """
         清理Mermaid代码中的转义字符
         """
-        # 替换转义的换行符
+        # 替换转义字符
         code = code.replace('\\n', '\n')
-        # 替换转义的双引号
         code = code.replace('\\"', '"')
-        # 移除可能存在的首尾引号（如果有的话）
         if code.startswith('"') and code.endswith('"'):
             code = code[1:-1]
         # 移除多余的空白字符
         code = code.strip()
+
+        if '```mermaid' in code:
+            start = code.find('```mermaid') + len('```mermaid')
+            end = code.find('```', start)
+            code = code[start:end]
+        elif '```' in code:
+            parts = code.split('```')
+            if len(parts) > 2:
+                code = parts[1]
         
         return code
             
@@ -390,8 +410,9 @@ def run_pipeline(user_query):
     return mermaid_code
 
 if __name__ == "__main__":
-    query = "design a history education system based on LLM. Nodes: graph TD; LLM;\n Virtual Reality;"
+    query = "design a history education system based on LLM. Nodes: graph TD;\n Subgraph\n vr[Virtual Reality]--> EyeTracking[Eye Tracking]\n end\n;"
     run_pipeline(query)
+
     # vector_store, graph_store = load_stores()
     # planner = PlannerAgent(client)
     # retriever = RetrieverAgent(vector_store, graph_store, client)
