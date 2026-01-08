@@ -1,5 +1,6 @@
 import os
 import httpx
+import json
 from llama_index.core import StorageContext
 from llama_index.core.schema import TextNode, NodeWithScore
 from llama_index.llms.openai import OpenAI
@@ -35,7 +36,7 @@ def load_stores():
         exit(1)
     return vector_store, graph_store
 
-def custom_retrieve(query_text, vector_store, graph_store, top_k=5, node_type=None, in_type_filter=None):
+def custom_retrieve(query_text, vector_store, graph_store, top_k=10, node_type=None, role_filter=None):
     print(f"\n🔍 Executing Custom Retrieval for: '{query_text}'")
     
     embed_model = OpenAIEmbedding(model_name="text-embedding-3-small")
@@ -44,8 +45,6 @@ def custom_retrieve(query_text, vector_store, graph_store, top_k=5, node_type=No
     filter_list = []
     if node_type:
         filter_list.append(ExactMatchFilter(key="type", value=node_type))
-    if in_type_filter:
-        filter_list.append(ExactMatchFilter(key="std_in", value=in_type_filter))
 
     filters = MetadataFilters(filters=filter_list) if filter_list else None
     
@@ -60,12 +59,18 @@ def custom_retrieve(query_text, vector_store, graph_store, top_k=5, node_type=No
     found_scores = vec_result.similarities
     
     print(f"   -> Vector Search found {len(found_ids)} candidate IDs.")
-    
+
     retrieved_nodes = []
     with graph_store._driver.session() as session:
         for node_id, score in zip(found_ids, found_scores):
+            # Stop if we have enough
+            if len(retrieved_nodes) >= top_k:
+                break
+
             cypher = """
             MATCH (center:LlamaNode) WHERE center.id = $id 
+            // Role Filtering
+            AND ($role_filter IS NULL OR center.role CONTAINS $role_filter)
             WITH center
             OPTIONAL MATCH (center)-[r:FLOWS_TO]->(next:LlamaNode)
             WITH center, collect(distinct {name: next.name, id: next.id, function: next.text, code: next.code, edge_label:r.edge_label, properties: properties(r)}) as downstreams
@@ -82,7 +87,7 @@ def custom_retrieve(query_text, vector_store, graph_store, top_k=5, node_type=No
                 downstreams,
                 dependencies
             """
-            result = session.run(cypher, id=node_id).single()
+            result = session.run(cypher, id=node_id, role_filter=role_filter).single()
             
             if result:
                 center_node = result["center"]
@@ -104,15 +109,18 @@ def custom_retrieve(query_text, vector_store, graph_store, top_k=5, node_type=No
                 retrieved_nodes.append(NodeWithScore(node=node, score=score))
 
             else:
-                print(f"   ❌ ID {node_id} NOT FOUND in Neo4j. (This should not happen with MERGE)")
+                if role_filter:
+                    print(f"   ⚠️  ID {node_id} filtered out (Role mismatch). Required: {role_filter}")
+                else: 
+                    print(f"   ❌ ID {node_id} NOT FOUND in Neo4j. (This should not happen with MERGE)")
 
     return retrieved_nodes
 
-def retrieve_and_get_content(query, vector_store=None, graph_store=None, top_k=5, node_type=None, in_type=None):
+def retrieve_and_get_content(query, vector_store=None, graph_store=None, top_k=5, node_type=None, role_filter=None):
     if vector_store is None or graph_store is None:
         vector_store, graph_store = load_stores()
 
-    retrieved_nodes = custom_retrieve(query, vector_store, graph_store, top_k, node_type, in_type)
+    retrieved_nodes = custom_retrieve(query, vector_store, graph_store, top_k, node_type, role_filter)
     processed_nodes = []
     for node_with_score in retrieved_nodes:
         node = node_with_score.node
@@ -152,17 +160,66 @@ def retrieve_and_get_content(query, vector_store=None, graph_store=None, top_k=5
 
     return processed_nodes
 
+def find_structural_path(source_text, target_text, vector_store, graph_store, rel_type="DATA_FLOW", top_k=5):
+    """
+    Find the structural path between two nodes in the graph.
+    """
+    src_nodes = custom_retrieve(source_text, vector_store, graph_store, top_k, node_type="MODULE")
+    src_ids = [node.node.id_ for node in src_nodes]
+    tgt_nodes = custom_retrieve(target_text, vector_store, graph_store, top_k, node_type="MODULE")
+    tgt_ids = [node.node.id_ for node in tgt_nodes]
+    if not src_ids or not tgt_ids:
+        return []
+    found_paths = []
+
+    if rel_type == "CONTAINS":        
+        pass
+
+
+    else:
+        cypher = """
+        MATCH (s:LlamaNode), (t:LlamaNode)
+        WHERE s.id IN $src_ids AND t.id IN $tgt_ids
+        AND s.id <> t.id
+        MATCH p = shortestPath((s)-[*1..5]-(t))
+        RETURN
+            [n in nodes(p) | {id: n.id, name: n.name, text: n.text}] as path_nodes,
+            [r in relationships(p) | type(r)] as relations,
+            length(p) as len
+        ORDER BY len ASC
+        LIMIT 3
+        """
+        with graph_store.client.session() as session:
+            result = session.run(cypher, src_ids=src_ids, tgt_ids=tgt_ids)
+            for record in result:
+                path_data = {
+                    "source_query": source_text,
+                    "target_query": target_text,
+                    "path_nodes": record["path_nodes"],
+                    "relations": record["relations"]
+                }
+                found_paths.append(path_data)
+
+                node_names = "-> ".join([node["name"] for node in record["path_nodes"]])
+                print(f"   ✅ Path found: {node_names}")
+
+    
+
+    return found_paths
 
 if __name__ == "__main__":
     vector_store, graph_store = load_stores()
     query = "The query is routed to the appropriate category manager, which then provides an answer using its knowledge base. If the query doesn't fit a category, a fine-tuned model generates the answer."
     
-    retrieved_nodes = retrieve_and_get_content(query, vector_store, graph_store, top_k=5, node_type="WORKFLOW", in_type=None)
+    # retrieved_nodes = retrieve_and_get_content(query, vector_store, graph_store, top_k=5, node_type="WORKFLOW", in_type=None)
 
-    print("\n" + "="*50)
-    print(f"✅ Found {len(retrieved_nodes)} nodes with content.")
-    for n in retrieved_nodes:
-        print(n.node.text)
-        print(n.node.metadata.get("topology", "N/A"))
-        print(n.score)
-    print("="*50 + "\n")
+    # print("\n" + "="*50)
+    # print(f"✅ Found {len(retrieved_nodes)} nodes with content.")
+    # for n in retrieved_nodes:
+    #     print(n.node.text)
+    #     print(n.node.metadata.get("topology", "N/A"))
+    #     print(n.score)
+    # print("="*50 + "\n")
+
+    paths = find_structural_path("detector", "facial recognition", vector_store, graph_store, rel_type="CONTAINS", top_k=5)
+    print(paths)
