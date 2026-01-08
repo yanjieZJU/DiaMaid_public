@@ -1,0 +1,113 @@
+import os
+import json
+import httpx
+from openai import OpenAI
+
+# --- Configuration ---
+DATA_DIR = "./case_llm_education/json_files"
+API_KEY = "sk-y44HwiOqlzdvdMwiVGmyzpITjGQdkwWS0bJuDMWN2awpHnX7"
+BASE_URL = "https://poloai.top/v1"
+
+# Taxonomy Definition
+TAXONOMY = """
+1. **user_entity**
+    - target_user: Main operator
+    - stakeholder: observer or assistant, e.g., instructor, researcher
+2. **sensing_input**
+    - bio_sensor: e.g., EEG, EMG, ECG, Eye tracker
+    - env_sensor: e.g., RGB Camera, motion capture, IMU
+    - direct_input: e.g., Keyboard, Mouse, Touchscreen
+3. **processing_core**
+    - ai_inference: e.g., LLM, Neural network
+    - algorithm: definite algorithms and rules
+    - pre_processor: data preprocessing and cleaning, e.g., Normalizer, Noise reduction
+4. **interface_output**
+    - immersive_display: e.g., VR headset, AR glasses, Unity Scene
+    - gui_display: visual display, e.g., Web UI, Mobile screen
+    - haptic_feedback: e.g., Vibration motors, exoskeleton feedback
+    - audio_output: e.g., TTS, Sound effects
+5. **infrastructure**
+    - data_storage: e.g., vector DB, Database, Knowledge graph
+    - communication: e.g., HTTP Server, WebSocket, Bluetooth
+"""
+
+http_client = httpx.Client(proxy=None, trust_env=False)
+client = OpenAI(api_key=API_KEY, base_url=BASE_URL, http_client=http_client)
+
+def classify_role(module_name, function_desc, original_role):
+    prompt = f"""
+    You are a data labeling assistant.
+    ## Taxonomy
+    {TAXONOMY}
+    
+    ## Task
+    Classify the following module into one of the Level 2 categories from the taxonomy above.
+    
+    Module Name: {module_name}
+    Original Role: {original_role}
+    Function Description: {function_desc}
+    
+    ## Output Format
+    Return ONLY a JSON object with the following format:
+    {{
+        "role": "level1_category: level2_category" 
+    }}
+    Example: {{"role": "processing_core: ai_inference"}}
+    If you are unsure, choose the closest match. Ensure the output is strictly lowercase.
+    """
+    
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            response_format={"type": "json_object"},
+            temperature=0
+        )
+        result = json.loads(response.choices[0].message.content)
+        return result.get("role", "unknown")
+    except Exception as e:
+        print(f"Error classifying {module_name}: {e}")
+        return "unknown"
+
+def process_files():
+    if not os.path.exists(DATA_DIR):
+        print(f"Error: Directory {DATA_DIR} not found.")
+        return
+
+    files = [f for f in os.listdir(DATA_DIR) if f.endswith(".json")]
+    print(f"Found {len(files)} JSON files. Starting batch processing...")
+
+    for i, filename in enumerate(files):
+        filepath = os.path.join(DATA_DIR, filename)
+        try:
+            with open(filepath, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            
+            modules = data.get("modules", [])
+            modified = False
+            
+            print(f"[{i+1}/{len(files)}] Processing {filename} ({len(modules)} modules)...")
+            
+            for mod in modules:
+                # Basic check to avoid re-processing if already in new format (this is a heuristic)
+                # But user asked to re-process, so we simply run it.
+                new_role = classify_role(
+                    mod.get("mod_id", ""), 
+                    mod.get("function_description", ""), 
+                    mod.get("role", "")
+                )
+                
+                print(f"   - {mod.get('mod_id')}: {mod.get('role')} -> {new_role}")
+                mod["role"] = new_role
+                modified = True
+            
+            if modified:
+                with open(filepath, 'w', encoding='utf-8') as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+                print("   Saved.")
+                
+        except Exception as e:
+            print(f"Error processing file {filename}: {e}")
+
+if __name__ == "__main__":
+    process_files()
