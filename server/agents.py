@@ -3,7 +3,13 @@ import re
 import httpx
 import json
 from openai import OpenAI
-from retriever_neo4j import load_stores, retrieve_and_get_content, find_structural_path
+from retriever_neo4j import (
+    load_stores, 
+    retrieve_and_get_content, 
+    find_structural_path,
+    analyze_skeleton_roles,
+    retrieve_with_far_hop
+)
 
 http_client = httpx.Client(proxy=None, trust_env=False)
 client = OpenAI(
@@ -52,8 +58,8 @@ class PlannerAgent:
         4. Extract ALL user defined relations (explicit) from the user query. For example, the arrow '-->' means the data flow from source to target, the use of subgraph means the inclusion relationship. DO NOT REPEAT.
         5. For each anchor, you must also infer its functional role based on the following taxonomy:
            - user_entity: target_user, stakeholder
-           - sensing_input: bio_sensor, env_sensor, direct_input
-           - processing_core: ai_inference, algorithm, pre_processor
+           - sensing_input: bio_sensor (internal human physiological signals, e.g., EEG, EMG, ECG), behavior_sensor (external human behavior/movements, e.g., IMU, eye tracker), env_sensor (environmental signals, e.g., RGB Camera), direct_input (direct human-computer interaction input)
+           - processing_core: signal_optimization, feature_extraction, state_assessment, decision_logic, content_generation
            - interface_output: immersive_display, gui_display, haptic_feedback, audio_output
            - infrastructure: data_storage, communication
            (Output the Level 1 category, or 'Level 1: Level 2' if you are sure)
@@ -82,7 +88,7 @@ class PlannerAgent:
             response = self.client.chat.completions.create(
                 model="gpt-4o",
                 messages=[{"role": "user", "content": prompt}],
-                temperature=0.7,
+                temperature=0.2,
                 response_format={"type": "json_object"},
             ).choices[0].message.content
             print(f"LLM Response: {str(response)}")
@@ -223,7 +229,7 @@ class IntegratorAgent:
     def __init__(self, client):
         self.client = client
 
-    def integrate_arch(self, plan, skeletons, retrieved_info, structural_hints=[]):
+    def integrate_arch(self, query, skeletons, retrieved_info, structural_hints=[]):
         skeletons_text = ""
         if skeletons:
             for i, s in enumerate(skeletons):
@@ -245,7 +251,7 @@ class IntegratorAgent:
         You are a professional designer and researcher in the field of HCI. Design a complete pipeline based on the user's requirements and the retrieved information.
         ## User Requirements
         The user requirements are the principle you should follow the most. The nodes in the query must be included in the pipeline.
-        User Query: ```{json.dumps(plan, ensure_ascii=False, indent=2)}```
+        User Query: ```{query}```
         \n\n
         ## Retrieved Information
         You have three sources of information. Use them according to the following rules.
@@ -314,7 +320,7 @@ class IntegratorAgent:
             response = self.client.chat.completions.create(
                 model="gpt-4o",
                 messages=[{"role": "user", "content": prompt}],
-                temperature=0.7,
+                temperature=0.8,
                 response_format={"type": "json_object"},
             ).choices[0].message.content
         except Exception as e:
@@ -447,73 +453,123 @@ def run_pipeline(user_query, num_outputs=3):
     filtered_skeletons = retriever.rerank_with_llm(user_query, skeletons)
     user_relations = arch_plan["relations"]
 
-    # Limit to num_outputs to avoid unnecessary processing if we have more candidates
     target_skeletons = filtered_skeletons[:num_outputs]
     
-    # If we don't have enough skeletons, we might just reuse valid ones or proceed with fewer.
-    # But usually rerank_with_llm ensures up to 3.
-    
     results = []
-    
-    # Retrieve modules once (shared for all variations)
-    ref_nodes_map = retriever.retrieve_for_module(arch_plan["anchors"])
-    ref_info = {}
-    for anchor in arch_plan["anchors"]:
-        anchor_name = anchor["user_term"]
-        if anchor_name in ref_nodes_map:
-            retrieved_list = ref_nodes_map[anchor_name]
+    structural_hints = retriever.retrieve_structure_paths(user_relations)
+
+    # === Generate options with DIFFERENT retrieval strategies ===
+    STRATEGIES = [
+        "close-hop",            # Option 1: Precise matching
+        "far-hop-complementary",# Option 2: Skeleton-based extension
+        "far-hop-diverse"       # Option 3: Cross-category exploration
+    ]
+
+    for i, s in enumerate(target_skeletons):
+        # Determine strategy based on index (cyclic if num_outputs > 3)
+        strategy_type = STRATEGIES[i % len(STRATEGIES)]
+        
+        print(f"\n{'='*60}")
+        print(f"=== Generating Option {i+1} using Skeleton {i} ===")
+        print(f"{'='*60}")
+        print(f"Skeleton Preview: {s.node.text[:100]}...\n")
+        
+        ref_nodes_map = {}
+        
+        if strategy_type == "close-hop":
+            # === Option 1: Close-hop (Near-hop) - Precise matching ===
+            print("🎯 Strategy: CLOSE-HOP (Precise role matching)")
+            print("   → Retrieving modules exactly matching user's anchor roles\n")
+            
+            ref_nodes_map = retriever.retrieve_for_module(arch_plan["anchors"])
+            
+            # Filter empty results for logging clarity
+            for anchor in arch_plan["anchors"]:
+                anchor_name = anchor["user_term"]
+                if anchor_name not in ref_nodes_map:
+                    print(f"   ⚠️  No modules found for anchor: {anchor_name}")
+        
+        elif strategy_type == "far-hop-complementary":
+            # === Option 2: Far-hop with Skeleton-aware Complementary Retrieval ===
+            print("🔭 Strategy: FAR-HOP (Skeleton-aware complementary)")
+            
+            # Analyze skeleton's role distribution
+            skeleton_analysis = analyze_skeleton_roles(s, graph_store)
+            
+            print(f"   → Retrieving user anchors + complementary modules based on skeleton\n")
+            
+            # Use far-hop retrieval with complementary strategy
+            ref_nodes_map = retrieve_with_far_hop(
+                arch_plan["anchors"],
+                vector_store,
+                graph_store,
+                skeleton_analysis=skeleton_analysis,
+                strategy="complementary",
+                top_k=3,
+                context=arch_plan["design_goal"]
+            )
+        
+        elif strategy_type == "far-hop-diverse":
+            # === Option 3: Far-hop with Diverse Cross-category Exploration ===
+            print("🌐 Strategy: FAR-HOP (Diverse cross-category exploration)")
+            print(f"   → Retrieving user anchors + diverse modules from unexplored categories\n")
+            
+            # Use far-hop retrieval with diverse strategy
+            ref_nodes_map = retrieve_with_far_hop(
+                arch_plan["anchors"],
+                vector_store,
+                graph_store,
+                skeleton_analysis=None,  # Don't use skeleton for diverse strategy
+                strategy="diverse",
+                top_k=3,
+                context=arch_plan["design_goal"]
+            )
+            
+        # Common processing for retrieved nodes
+        ref_info = {}
+        for anchor_name, retrieved_list in ref_nodes_map.items():
             anchor_nodes = []
             for node_with_score in retrieved_list:
                 node = node_with_score.node
                 anchor_nodes.append({
                     'id': node.id_,
                     'text': node.text,
-                    'code': node.metadata.get("code", ""),
-                    'score': node_with_score.score,
-                    'metadata': dict(node.metadata)
+                    'score': node_with_score.score
                 })
             ref_info[anchor_name] = anchor_nodes
-        else:
-            print(f"No modules found for anchor: {anchor_name}")
 
-    structural_hints = retriever.retrieve_structure_paths(user_relations)
-
-    for i, s in enumerate(target_skeletons):
-        print(f"\n=== Generating Option {i+1} using Skeleton {i} ===\n")
-        print(f"Skeleton Preview: {s.node.text[:100]}...\n")
+        print(f"\n📦 Retrieved modules summary for Option {i+1}:")
+        for anchor_name, nodes in ref_info.items():
+            is_complementary = anchor_name.startswith("[Complementary]")
+            symbol = "   🆕" if is_complementary else "   ✓"
+            print(f"{symbol} {anchor_name}: {len(nodes)} modules")
         
-        # We pass ONLY the current skeleton as the reference to ensure diversity
+        # Generate architecture using the retrieved modules
         new_arch = integrator.integrate_arch(
-            plan=arch_plan, 
+            query=user_query, 
             skeletons=[s], 
             retrieved_info=ref_info, 
             structural_hints=structural_hints
         )
+        
         if new_arch:
             mermaid_code = drawer.draw_flowchart(new_arch)
             results.append({
                 "option_id": i + 1,
+                "strategy": ["close-hop", "far-hop-complementary", "far-hop-diverse"][i],
                 "based_on_skeleton_score": s.score,
                 "mermaid_code": mermaid_code,
                 "description": json.loads(new_arch).get("overall_description", "") if new_arch else ""
             })
-            print(f"--- Mermaid Code (Option {i+1}) ---\n{mermaid_code}\n")
+            print(f"\n--- Mermaid Code (Option {i+1}) ---\n{mermaid_code}\n")
         else:
-            print(f"Failed to generate architecture for option {i+1}")
+            print(f"❌ Failed to generate architecture for option {i+1}")
 
     return results
+
 
 if __name__ == "__main__":
     query = "design a physical education system based on LLM. Nodes: graph TD;\n Trainee[Trainee]-->|user data| Sensor[Sensor]\n LLM[LLM]-->|LLM output| Virtual Reality\n;"
     results = run_pipeline(query, num_outputs=3)
     for res in results:
         print(f"\nFinal Result {res['option_id']}:\n{res['mermaid_code']}")
-
-    # vector_store, graph_store = load_stores()
-    # planner = PlannerAgent(client)
-    # retriever = RetrieverAgent(vector_store, graph_store, client)
-    # query = "design a history education system based on LLM. Nodes: graph TD; LLM;\n Virtual Reality;"
-    # arch_plan = planner.plan_system_architecture(query)
-    # skeletons = retriever.retrieve_for_skeleton(arch_plan["design_goal"])
-    # best_skeleton = retriever.rerank_with_llm(query, skeletons)
-    # print(best_skeleton.node.text)

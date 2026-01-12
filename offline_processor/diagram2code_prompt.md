@@ -21,14 +21,16 @@ Else: return: {"arch_exist": False}; exit the processing
    - If there are multiple inputs, **determine whether they complement each other or are independent**. For example, if the input includes a user query and an image, but they are inputted into the same module (after basic preprocessing such as converting image and text into the same type, like embedding) and are not distinguished thereafter, they should be considered as complementary inputs. Else, if they lead to different pipelines and different outputs, they should be considered as independent inputs.
    - If there are multiple outputs, **each should be considered as independent output**.
 2. For each **independent main input(s)-output pair**, clearly define one or more end-to-end paths/processes in the diagram, and sort out the respective nodes (function modules) and edges (data flow). The path should be represented as a sequence of nodes and edges.
-3. If there are multiple main workflows (such as multiple users, tasks, independent channels), they should be separately sorted out, and **use unique identifiers (use meaningful identifiers instead of numbers)**.
+3. If there are multiple main workflows (such as multiple users, tasks, independent channels), they should be separately sorted out.
+4. Labeling rule: **use unique and meaningful identifiers (according to specific functions) instead of numbers. DO NOT use "main_workflow" as the identifier**.
 ### 2. Identify supporting workflows
 1. **Supporting Workflow** refers to links that do not directly participate in th end-to-end user input-output process, but provide support fot the main workflow, such as training links, data preparation, knowledge management, background management, etc.
 2. **Specific methods**: 
    - The remaining functional modules that are not on any main process path are considered.
    - Analyze the dependencies of these modules, such as being the input, reference, parameter, etc. of the main process.
    - Clarification: The supporting workflows can be independently formed as a workflow, but it should be noted in the description "supporting ... main process's XX node/module".
-   - Each supporting workflow should describe its input and output, and be listed the identifiers in the main workflow it supported.
+   - Each supporting workflow should describe its input and output.
+3. Each supporting workflow should be listed the identifiers in the main workflow["dependencies"] it supported.
 
 ## Step 3: Module Extraction.
 For each workflow identified in step 2, use nodes (function modules) and edges (data flow) to represent them.
@@ -36,22 +38,29 @@ For each workflow identified in step 2, use nodes (function modules) and edges (
 1. Each extracted module should have clear technical/functional independence, facilitating subsequent reuse or replacement.
 2. **Definition of nodes and edges**: A node is a function module that performs a specific technical function. An edge is a data flow between two nodes. Apart from *terminal(start and sink) and data store(e.g., database, knowledge base)*, all other intermediate artifacts should be stored on the data transmission path ('edge_label') instead of a node.
 3. **Grouping Rule**: If a sequence of steps (A->B->C) is tightly coupled and performs one technical function (e.g., "data cleaning"), group them if necessary, but prefer retaining technical details for implementation clarity. 
-4. **Node Labeling Rule**: The node identifier must reflect the actual function/content of the node and avoid single-character or meaningless names. Be loyal to the original diagram. Based on the mermaid syntax, replace spaces with underscores, and the node name should not include brackets or other special characters.
+4. **Node Labeling Rule**: The node identifier must reflect the actual function/content of the node (align with the figure) and **AVOID single-character or meaningless names**. Be loyal to the original diagram. Based on the mermaid syntax, replace spaces with underscores, and the node name should not include brackets or other special characters.
 5. **Cross-Reference With Full Text**: Cross-reference the diagram nodes with the paper's Methdology/Implementation sections to obtain detailed descriptions. Include specific algorithms, hardware specs, key parameters, etc. to fill the function and technical details of the module.
 6. Use **concise and clear** language. Omit filler words like "The module utilizes ..." or "In order to ..."
+7. **Port Consistency**: Ensure that the 'ports' definitions are consistent. For any connection A -> B, the 'outgoing' port of module A (target_mod=B) MUST EXACTLY correspond to the 'incoming' port of module B (source_mod=A), including the 'edge_label'.
 
 ### Role Taxonomy
+**STRICTLY SELECT FROM THE FOLLOWING LIST. DO NOT INVENT NEW ROLES.**
+Return the role in the format: "Category: Role" (e.g., "processing_core: feature_extraction").
+
 1. **user_entity**
-    - target_user: Main operator
+    - target_user: the user who is the final user of the system
     - stakeholder: observer or assistant, e.g., instructor, researcher
 2. **sensing_input**
-    - bio_sensor: physiological signal acquisition, e.g., EEG, EMG, ECG, Eye tracker
-    - env_sensor: environment and behavioral perception, e.g., RGB Camera, motion capture, IMU
+    - bio_sensor: internal human physiological signals, e.g., EEG, EMG, ECG
+    - behavior_sensor: exernal human behaviors/movements. e.g., IMU, eye tracker, motion capture
+    - env_sensor: environment perception, e.g., RGB Camera, temperature sensor
     - direct_input: direct human-computer interaction input based on interfaces, e.g., Keyboard, Mouse, Touchscreen
 3. **processing_core**
-    - ai_inference: artificial intelligence and probabilistic models, e.g., LLM, Neural network
-    - algorithm: definite algorithms and rules
-    - pre_processor: data preprocessing and cleaning, e.g., Normalizer, Noise reduction
+    - signal_optimization: making the signal cleaner without changing the data type, e.g., filter, normalizer
+    - feature_extraction: convert raw high-dimensional data (images, audio streams) into structured features or symbolic representations, e.g., gaze tracker, pose estimator, speech-to-text
+    - state_assessment: qualitative or quantitative evaluation of the extracted features (judge how good/bad/intense something is), e.g., emotion recognition, fatigue detection
+    - decision_logic: determine the next step based on the state assessment, e.g., recommender logic, dialog manager (even if it uses an LLM, if the output is a control flag or strategy, it belongs here)
+    - content_generation: e.g., text generation (llm, chatbot), image generation (diffusion model)
 4. **interface_output**
     - immersive_display: immersive visual output, e.g., VR headset, AR glasses, Unity Scene
     - gui_display: traditional visual display, e.g., Web UI, Mobile screen

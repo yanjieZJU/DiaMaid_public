@@ -11,23 +11,26 @@ BASE_URL = "https://poloai.top/v1"
 # Taxonomy Definition
 TAXONOMY = """
 1. **user_entity**
-    - target_user: Main operator
+    - target_user: the user who is the final user of the system
     - stakeholder: observer or assistant, e.g., instructor, researcher
 2. **sensing_input**
-    - bio_sensor: e.g., EEG, EMG, ECG, Eye tracker
-    - env_sensor: e.g., RGB Camera, motion capture, IMU
-    - direct_input: e.g., Keyboard, Mouse, Touchscreen
+    - bio_sensor: internal human physiological signals, e.g., EEG, EMG, ECG
+    - behavior_sensor: exernal human behaviors/movements. e.g., IMU, eye tracker, motion capture
+    - env_sensor: environment perception, e.g., RGB Camera, temperature sensor
+    - direct_input: direct human-computer interaction input based on interfaces, e.g., Keyboard, Mouse, Touchscreen
 3. **processing_core**
-    - ai_inference: e.g., LLM, Neural network
-    - algorithm: definite algorithms and rules
-    - pre_processor: data preprocessing and cleaning, e.g., Normalizer, Noise reduction
+    - signal_optimization: making the signal cleaner without changing the data type, e.g., filter, normalizer
+    - feature_extraction: convert raw high-dimensional data (images, audio streams) into structured features or symbolic representations, e.g., gaze tracker, pose estimator, speech-to-text
+    - state_assessment: qualitative or quantitative evaluation of the extracted features (judge how good/bad/intense something is), e.g., emotion recognition, fatigue detection
+    - decision_logic: determine the next step based on the state assessment, e.g., recommender logic, dialog manager (even if it uses an LLM, if the output is a control flag or strategy, it belongs here)
+    - content_generation: e.g., text generation (llm, chatbot), image generation (diffusion model)
 4. **interface_output**
-    - immersive_display: e.g., VR headset, AR glasses, Unity Scene
-    - gui_display: visual display, e.g., Web UI, Mobile screen
+    - immersive_display: immersive visual output, e.g., VR headset, AR glasses, Unity Scene
+    - gui_display: traditional visual display, e.g., Web UI, Mobile screen
     - haptic_feedback: e.g., Vibration motors, exoskeleton feedback
     - audio_output: e.g., TTS, Sound effects
 5. **infrastructure**
-    - data_storage: e.g., vector DB, Database, Knowledge graph
+    - data_storage: storage unit, e.g., vector DB, Database, Knowledge graph
     - communication: e.g., HTTP Server, WebSocket, Bluetooth
 """
 

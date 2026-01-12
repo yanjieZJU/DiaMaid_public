@@ -21,6 +21,16 @@ NEO4J_USERNAME = "neo4j"
 NEO4J_PASSWORD = "BQLjYc4gOpIxTi6o5c-es481vKejEHHBGuxJeEvX9hg"
 NEO4J_URL = "neo4j+s://8891a7fc.databases.neo4j.io"
 
+# Role Collaboration Graph: defines typical data flow patterns between role categories
+# Used for far-hop retrieval to suggest complementary modules
+ROLE_COLLABORATION = {
+    "user_entity": ["sensing_input", "interface_output"],  # users interact with sensors and outputs
+    "sensing_input": ["processing_core"],  # sensors feed data to processors
+    "processing_core": ["interface_output", "infrastructure", "processing_core"],  # processors output results or feed other processors
+    "interface_output": ["user_entity"],  # outputs reach users
+    "infrastructure": ["processing_core", "sensing_input", "interface_output"]  # infrastructure supports all
+}
+
 def load_stores():
     print("Connecting to Stores...")
     graph_store = Neo4jPropertyGraphStore(
@@ -204,8 +214,172 @@ def find_structural_path(source_text, target_text, vector_store, graph_store, re
                 print(f"   ✅ Path found: {node_names}")
 
     
-
     return found_paths
+
+def extract_role_category(role_str):
+    """
+    Extract category from role string (format: "category: subcategory")
+    Returns: category string or None
+    """
+    if not role_str or ':' not in role_str:
+        return None
+    return role_str.split(':', 1)[0].strip()
+
+def analyze_skeleton_roles(skeleton_node, graph_store):
+    """
+    Analyze the role distribution in a skeleton (WORKFLOW node).
+    Returns a dict with role category counts and suggested complementary roles.
+    
+    Args:
+        skeleton_node: NodeWithScore object containing a WORKFLOW node
+        graph_store: Neo4j graph store
+    
+    Returns:
+        {
+            'role_counts': {'processing_core': 3, 'sensing_input': 1, ...},
+            'suggested_roles': ['interface_output', ...],  # roles to complement
+            'dominant_category': 'processing_core'
+        }
+    """
+    print(f"\n📊 Analyzing skeleton role distribution for: {skeleton_node.node.metadata.get('name', 'Unknown')}")
+    
+    skeleton_id = skeleton_node.node.id_
+    role_counts = {}
+    module_roles = []
+    
+    # Query to get all modules in this workflow's module_seq
+    cypher = """
+    MATCH (wf:LlamaNode {id: $wf_id})-[:EXECUTES_STEP]->(mod:LlamaNode)
+    WHERE mod.type = 'MODULE'
+    RETURN mod.role as role, mod.name as name
+    ORDER BY mod.name
+    """
+    
+    with graph_store._driver.session() as session:
+        result = session.run(cypher, wf_id=skeleton_id)
+        for record in result:
+            role = record.get("role", "")
+            name = record.get("name", "")
+            module_roles.append(role)
+            
+            category = extract_role_category(role)
+            if category:
+                role_counts[category] = role_counts.get(category, 0) + 1
+                print(f"   - {name}: {role} → category: {category}")
+    
+    # Find dominant category
+    dominant_category = max(role_counts.items(), key=lambda x: x[1])[0] if role_counts else None
+    
+    # Suggest complementary roles based on ROLE_COLLABORATION graph
+    suggested_roles = []
+    for category in role_counts.keys():
+        if category in ROLE_COLLABORATION:
+            for complementary in ROLE_COLLABORATION[category]:
+                if complementary not in role_counts or role_counts[complementary] == 0:
+                    if complementary not in suggested_roles:
+                        suggested_roles.append(complementary)
+    
+    print(f"   ✓ Role distribution: {role_counts}")
+    print(f"   ✓ Dominant category: {dominant_category}")
+    print(f"   ✓ Suggested complementary roles: {suggested_roles}")
+    
+    return {
+        'role_counts': role_counts,
+        'suggested_roles': suggested_roles,
+        'dominant_category': dominant_category,
+        'all_module_roles': module_roles
+    }
+
+def retrieve_with_far_hop(anchors_list, vector_store, graph_store, skeleton_analysis=None, 
+                          strategy="complementary", top_k=3, context=""):
+    """
+    Far-hop retrieval: supplement user's anchors with modules from related but different role categories.
+    
+    Args:
+        anchors_list: list of anchor dicts with 'user_term', 'description', 'role'
+        vector_store: vector store
+        graph_store: graph store
+        skeleton_analysis: optional dict from analyze_skeleton_roles()
+        strategy: 'complementary' (based on skeleton) or 'diverse' (explore different categories)
+        top_k: number of results per anchor
+        context: (str) Domain context or original user query to make retrieval specific
+    
+    Returns:
+        dict mapping anchor names to retrieved nodes, PLUS additional complementary modules
+    """
+    print(f"\n🔭 Far-hop Retrieval (strategy: {strategy})")
+    
+    anchor_mapping = {}
+    user_role_categories = set()
+    
+    # First, do normal retrieval for user's anchors (近跳部分)
+    for anchor in anchors_list:
+        user_term = anchor["user_term"]
+        description = anchor["description"]
+        role = anchor.get("role", None)
+        query_text = f"{user_term}: {description}"
+        
+        # Extract category from user's specified role
+        if role:
+            category = extract_role_category(role)
+            if category:
+                user_role_categories.add(category)
+        
+        retrieved_nodes = retrieve_and_get_content(
+            query_text, 
+            vector_store, 
+            graph_store, 
+            top_k,
+            node_type="MODULE",
+            role_filter=role
+        )
+        
+        if retrieved_nodes:
+            anchor_mapping[user_term] = retrieved_nodes
+            print(f"   ✓ Retrieved {len(retrieved_nodes)} modules for anchor '{user_term}'")
+    
+    # Now, the FAR-HOP part: retrieve complementary modules
+    complementary_roles = []
+    
+    if strategy == "complementary" and skeleton_analysis:
+        # Use skeleton's suggested roles
+        complementary_roles = skeleton_analysis.get('suggested_roles', [])
+        print(f"   → Complementary strategy: using skeleton-suggested roles {complementary_roles}")
+        
+    elif strategy == "diverse":
+        # Explore categories NOT in user's anchors
+        all_categories = set(ROLE_COLLABORATION.keys())
+        unexplored = all_categories - user_role_categories
+        complementary_roles = list(unexplored)
+        print(f"   → Diverse strategy: exploring unexplored categories {complementary_roles}")
+    
+    # Retrieve modules from complementary roles
+    for comp_role_category in complementary_roles[:2]:  # Limit to 2 complementary categories
+        # Create a specific query combining Domain Context + Target Role
+        if context:
+            query_text = f"{context} {comp_role_category.replace('_', ' ')}"
+        else:
+            query_text = f"module for {comp_role_category.replace('_', ' ')}"
+            
+        print(f"   🔍 Far-hop Query: '{query_text}'")
+
+        retrieved_nodes = retrieve_and_get_content(
+            query_text,
+            vector_store,
+            graph_store,
+            top_k=2,  # Fewer results for补充 modules
+            node_type="MODULE",
+            role_filter=comp_role_category  # Filter by category (partial match in Cypher)
+        )
+        
+        if retrieved_nodes:
+            # Add as a "补充" anchor
+            comp_anchor_name = f"[Complementary] {comp_role_category}"
+            anchor_mapping[comp_anchor_name] = retrieved_nodes
+            print(f"   ✓ Added {len(retrieved_nodes)} complementary modules for '{comp_role_category}'")
+    
+    return anchor_mapping
+
 
 if __name__ == "__main__":
     vector_store, graph_store = load_stores()

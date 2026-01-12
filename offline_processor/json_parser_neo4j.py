@@ -2,6 +2,7 @@ import json
 import os
 import shutil
 import uuid
+import re
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
 from llama_index.core import PropertyGraphIndex, StorageContext
@@ -12,7 +13,7 @@ from llama_index.graph_stores.neo4j import Neo4jPropertyGraphStore
 from llama_index.core.vector_stores import SimpleVectorStore
 
 # --- 配置 ---
-DATA_DIR = "./case_llm_education/json_files"
+DATA_DIR = "./case_llm_artifact/json_files"
 STORAGE_DIR = "./server/graph_storage" 
 
 os.environ["OPENAI_API_KEY"] = "sk-y44HwiOqlzdvdMwiVGmyzpITjGQdkwWS0bJuDMWN2awpHnX7" 
@@ -21,6 +22,19 @@ os.environ["OPENAI_API_BASE"] = "https://poloai.top/v1"
 NEO4J_USERNAME = "neo4j"
 NEO4J_PASSWORD = "BQLjYc4gOpIxTi6o5c-es481vKejEHHBGuxJeEvX9hg"
 NEO4J_URL = "neo4j+s://8891a7fc.databases.neo4j.io"
+
+VALID_ROLES_MAP = {
+    "user_entity": ["target_user", "stakeholder"],
+    "sensing_input": ["bio_sensor", "behavior_sensor", "env_sensor", "direct_input"],
+    "processing_core": ["signal_optimization", "feature_extraction", "state_assessment", "decision_logic", "content_generation"],
+    "interface_output": ["immersive_display", "gui_display", "haptic_feedback", "audio_output"],
+    "infrastructure": ["data_storage", "communication"]
+}
+
+ROLE_TO_CATEGORY = {}
+for cat, roles in VALID_ROLES_MAP.items():
+    for r in roles:
+        ROLE_TO_CATEGORY[r] = cat
 
 STANDARD_IO_MAP = {
     "text":["text", "query", "string", "prompt", "document"],
@@ -162,6 +176,9 @@ def parse_json_to_graph_elements(json_path):
     # 创建映射字典 - 使用 mod_id 和 flow_id 作为键
     module_id_to_node_id = {}
     flow_id_to_node_id = {}
+    
+    # 跟踪本文件内创建的角色节点，避免重复
+    created_role_nodes = {}
 
     # --- 2. 创建 Module 节点 ---
     for module_data in modules:
@@ -198,6 +215,7 @@ def parse_json_to_graph_elements(json_path):
             "role": module_data.get('role', ''),
             "code": mermaid_code,
             "source": file_name,
+            "subnodes": module_data.get('subnodes', [])
         }
             
         mod_node = TextNode(
@@ -215,6 +233,101 @@ def parse_json_to_graph_elements(json_path):
             target_id=node_uid,
             label="DEFINES_MODULE"
         ))
+
+        # --- NEW: 处理 Role 节点 (with Validation) ---
+        role_str = module_data.get('role', '')
+        # 格式预期: "category: subclass" (例如: "user_entity: target_user")
+        if role_str and ':' in role_str:
+            parts = role_str.split(':', 1)
+            raw_cat = parts[0].strip()
+            raw_role = parts[1].strip()
+            
+            final_cat = None
+            final_role = None
+            
+            # Check validity
+            is_valid_cat = raw_cat in VALID_ROLES_MAP
+            is_valid_role = is_valid_cat and (raw_role in VALID_ROLES_MAP[raw_cat])
+            
+            if is_valid_role:
+                final_cat = raw_cat
+                final_role = raw_role
+            else:
+                # Correction Logic
+                # Case 1: The "Category" part is actually a valid Role (e.g. content_generation: text_generation)
+                if raw_cat in ROLE_TO_CATEGORY:
+                    final_cat = ROLE_TO_CATEGORY[raw_cat]
+                    final_role = raw_cat # The category text was actually the role
+                    print(f"⚠️ [Role Fix] Mapped invalid '{role_str}' to '{final_cat}: {final_role}'")
+                
+                # Case 2: Broad Category is valid, but Role is invalid (e.g. processing_core: data_collection)
+                elif is_valid_cat:
+                    final_cat = raw_cat
+                    final_role = None # No valid role to assign
+                    print(f"⚠️ [Role Fix] Invalid role in '{role_str}'. Fallback to Category '{final_cat}'.")
+                
+                else:
+                    print(f"⚠️ [Role Fix] Totally invalid role '{role_str}'. Skipping.")
+                    continue
+
+            # --- Create Nodes & Relations ---
+            
+            # 1. Category Node (Must exist if final_cat is set)
+            if final_cat:
+                cat_node_id = f"ROLE_CAT_{final_cat.replace(' ', '_')}"
+                if cat_node_id not in created_role_nodes:
+                    cat_text = f"Role Category: {final_cat}"
+                    cat_node = TextNode(
+                        text=cat_text,
+                        id_=cat_node_id,
+                        metadata={
+                            "name": final_cat,
+                            "type": "ROLE_CATEGORY",
+                            "source": "SYSTEM_ONTOLOGY" 
+                        }
+                    )
+                    created_role_nodes[cat_node_id] = cat_node
+                    nodes.append(cat_node)
+                
+                # 2. Role Node (Only if final_role is set)
+                if final_role:
+                    sub_node_id = f"ROLE_SUB_{final_role.replace(' ', '_')}"
+                    if sub_node_id not in created_role_nodes:
+                        sub_text = f"Role: {final_role}\nCategory: {final_cat}"
+                        sub_node = TextNode(
+                            text=sub_text,
+                            id_=sub_node_id,
+                            metadata={
+                                "name": final_role,
+                                "type": "ROLE",
+                                "category": final_cat,
+                                "source": "SYSTEM_ONTOLOGY"
+                            }
+                        )
+                        created_role_nodes[sub_node_id] = sub_node
+                        nodes.append(sub_node)
+                        
+                        # Sub -> Cat Relation
+                        relations.append(Relation(
+                            source_id=sub_node_id,
+                            target_id=cat_node_id,
+                            label="IS_CATEGORY"
+                        ))
+                    
+                    # Module -> Role Relation
+                    relations.append(Relation(
+                        source_id=node_uid,
+                        target_id=sub_node_id,
+                        label="HAS_ROLE"
+                    ))
+                
+                else:
+                    # Fallback: Link Module -> Category Node directly
+                    relations.append(Relation(
+                        source_id=node_uid,
+                        target_id=cat_node_id,
+                        label="HAS_ROLE"
+                    ))
 
     # --- 3. 创建 Workflow 节点 ---
     for wf_data in workflows:
@@ -318,76 +431,89 @@ def parse_json_to_graph_elements(json_path):
 
 
 def force_update_neo4j_content(nodes, graph_store):
-    """
-    [CRITICAL FIX]: 使用 MERGE 而不是 MATCH。
-    这确保如果节点不存在，它会被创建；如果存在，属性会被强制覆盖。
-    """
-    print(f"\n[NEO4J] Force updating {len(nodes)} nodes with visible text content...")
+    print(f"\n[NEO4J] Force updating {len(nodes)} nodes with visible text content (Batch Mode)...")
     driver = graph_store._driver
     
     query = """
-    MERGE (n:LlamaNode {id: $node_id})
-    SET n += $props
-    SET n.text = $text_content
-    SET n.name = $name
-    SET n.node_type = $node_type
-    SET n.code = $code
+    UNWIND $batch AS row
+    MERGE (n:LlamaNode {id: row.node_id})
+    SET n += row.props
+    SET n.text = row.text_content
+    SET n.name = row.name
     """
     
-    success_count = 0
+    batch_data = []
+    for node in nodes:
+        props = node.metadata.copy()
+        node_name = props.get("name", '')
+        if 'full_code' in props:
+            props['code'] = props['full_code']
+            del props['full_code']
+        
+        if 'id' in props:
+            props['ref_id'] = props.pop('id')
+            
+        batch_data.append({
+            "node_id": node.node_id,
+            "text_content": node.text,
+            "name": node_name,
+            "props": props
+        })
+        
+    # Batch execution
+    batch_size = 500
+    total_processed = 0
     with driver.session() as session:
-        for node in nodes:
+        for i in range(0, len(batch_data), batch_size):
+            batch = batch_data[i:i+batch_size]
             try:
-                props = node.metadata.copy()
-                node_name = props.get("name", '')
-                node_type = props.get("type", '')
-                node_code = props.get("code") or props.get("full_code") or ""
-                for k, v in props.items():
-                    if isinstance(v, (dict, list)):
-                        if isinstance(v, dict) or (isinstance(v, list) and len(v) > 0 and isinstance(v[0], (dict, list))):
-                            props[k] = json.dumps(v, ensure_ascii=False)
-                if 'id' in props:
-                    props['ref_id'] = props.pop('id')
-                
-                # 执行写入
-                session.run(query, 
-                            node_id=node.node_id, 
-                            text_content=node.text, 
-                            name=node_name,
-                            node_type=node_type,
-                            code=node_code,
-                            props=props)
-                success_count += 1
+                session.run(query, batch=batch)
+                total_processed += len(batch)
+                print(f"  Processed {total_processed}/{len(nodes)} nodes...")
             except Exception as e:
-                print(f"  Failed to update node {node.node_id}: {e}")
-                
-    print(f"✅ [NEO4J] Update complete. Processed {success_count}/{len(nodes)} nodes.\n")
+                print(f"  Failed to update batch starting at {i}: {e}")
+
+    print(f"✅ [NEO4J] Update complete.\n")
 
 def force_update_neo4j_relations(relations, graph_store):
-    print(f"\n[NEO4J] Force updating {len(relations)} relations...")
+    print(f"\n[NEO4J] Force updating {len(relations)} relations (Batch Mode)...")
     driver = graph_store._driver
-    success_count = 0
-
+    
+    # Group by label to optimize batching
+    grouped_rels = {}
+    for rel in relations:
+        raw_label = rel.label
+        label = raw_label.replace(" ", "_").replace("<br/>", "_").replace("<br>", "_")
+        if label not in grouped_rels:
+            grouped_rels[label] = []
+        
+        grouped_rels[label].append({
+            "source_id": rel.source_id,
+            "target_id": rel.target_id,
+            "props": rel.properties
+        })
+    
     with driver.session() as session:
-        for rel in relations:
-            try:
-                raw_label = rel.label
-                label = raw_label.replace(" ", "_").replace("<br/>", "_").replace("<br>", "_")
-                query = f"""
-                MATCH (s: LlamaNode {{id: $source_id}})
-                MATCH (t: LlamaNode {{id: $target_id}})
-                MERGE (s)-[r:`{label}`]->(t)
-                SET r += $props
-                """
-                session.run(query, 
-                            source_id=rel.source_id, 
-                            target_id=rel.target_id, 
-                            props=rel.properties)
-                success_count += 1
-            except Exception as e:
-                print(f"  Failed to update relation {rel.source_id} -> {rel.target_id}: {e}")
-                
-    print(f"✅ [NEO4J] Update complete. Processed {success_count}/{len(relations)} relations.\n")
+        for label, batch in grouped_rels.items():
+            print(f"  Updating {len(batch)} relations of type '{label}'...")
+            query = f"""
+            UNWIND $batch AS row
+            MATCH (s: LlamaNode {{id: row.source_id}})
+            MATCH (t: LlamaNode {{id: row.target_id}})
+            MERGE (s)-[r:`{label}`]->(t)
+            SET r += row.props
+            """
+            
+            # Sub-batch execution
+            batch_size = 1000
+            for i in range(0, len(batch), batch_size):
+                sub_batch = batch[i:i+batch_size]
+                try:
+                    session.run(query, batch=sub_batch)
+                except Exception as e:
+                     print(f"  Failed to update batch of {label}: {e}")
+
+    print(f"✅ [NEO4J] Relations update complete.\n")
 
 def create_semantic_bridges(nodes, graph_store, threshold=0.76):
     """
@@ -472,7 +598,11 @@ def build_graph_index():
         print("❌ CRITICAL ERROR: No nodes parsed.")
         return
 
-    print(f"Total nodes: {len(all_nodes)}")
+    # 去重: 因为角色节点可能在多个文件中被重复生成，这里按 id_ 唯一化
+    unique_nodes_dict = {n.node_id: n for n in all_nodes}
+    all_nodes = list(unique_nodes_dict.values())
+
+    print(f"Total nodes (after deduplication): {len(all_nodes)}")
     
     print("Generating embeddings manually...")
     text_to_embed = [n.metadata.get("_embed_content", n.text) for n in all_nodes]
@@ -491,9 +621,9 @@ def build_graph_index():
         print(f"3. Upserting {len(all_relations)} relations...")
         force_update_neo4j_relations(all_relations, graph_store)
 
-    # NEW: create semantic bridges
-    analyze_similarity_distribution(all_nodes)
-    create_semantic_bridges(all_nodes, graph_store)
+    # # NEW: create semantic bridges
+    # analyze_similarity_distribution(all_nodes)
+    # create_semantic_bridges(all_nodes, graph_store)
 
     print("Persisting Vector Store to disk...")
     storage_context.persist(persist_dir=STORAGE_DIR)
