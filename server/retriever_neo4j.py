@@ -46,7 +46,7 @@ def load_stores():
         exit(1)
     return vector_store, graph_store
 
-def custom_retrieve(query_text, vector_store, graph_store, top_k=10, node_type=None, role_filter=None):
+def custom_retrieve(query_text, vector_store, graph_store, top_k, node_type=None, role_filter=None):
     print(f"\n🔍 Executing Custom Retrieval for: '{query_text}'")
     
     embed_model = OpenAIEmbedding(model_name="text-embedding-3-small")
@@ -57,6 +57,8 @@ def custom_retrieve(query_text, vector_store, graph_store, top_k=10, node_type=N
         filter_list.append(ExactMatchFilter(key="type", value=node_type))
 
     filters = MetadataFilters(filters=filter_list) if filter_list else None
+
+    print(f"top k: {top_k}")
     
     query_obj = VectorStoreQuery(
         query_embedding=query_embedding,
@@ -79,8 +81,8 @@ def custom_retrieve(query_text, vector_store, graph_store, top_k=10, node_type=N
 
             cypher = """
             MATCH (center:LlamaNode) WHERE center.id = $id 
-            // Role Filtering
-            AND ($role_filter IS NULL OR center.role CONTAINS $role_filter)
+            // Role Filtering (ignore case and spaces)
+            AND ($role_filter IS NULL OR replace(toLower(center.role), ' ', '') CONTAINS replace(toLower($role_filter), ' ', ''))
             WITH center
             OPTIONAL MATCH (center)-[r:FLOWS_TO]->(next:LlamaNode)
             WITH center, collect(distinct {name: next.name, id: next.id, function: next.text, code: next.code, edge_label:r.edge_label, properties: properties(r)}) as downstreams
@@ -126,7 +128,7 @@ def custom_retrieve(query_text, vector_store, graph_store, top_k=10, node_type=N
 
     return retrieved_nodes
 
-def retrieve_and_get_content(query, vector_store=None, graph_store=None, top_k=5, node_type=None, role_filter=None):
+def retrieve_and_get_content(query, vector_store, graph_store, top_k=5, node_type=None, role_filter=None):
     if vector_store is None or graph_store is None:
         vector_store, graph_store = load_stores()
 
@@ -192,21 +194,48 @@ def find_structural_path(source_text, target_text, vector_store, graph_store, re
         WHERE s.id IN $src_ids AND t.id IN $tgt_ids
         AND s.id <> t.id
         MATCH p = shortestPath((s)-[*1..5]-(t))
+        WHERE any(r in relationships(p) WHERE type(r) = 'FLOWS_TO')
         RETURN
             [n in nodes(p) | {id: n.id, name: n.name, text: n.text}] as path_nodes,
             [r in relationships(p) | type(r)] as relations,
+            [r in relationships(p) | properties(r)] as rel_props,
             length(p) as len
         ORDER BY len ASC
-        LIMIT 3
+        LIMIT 10
         """
-        with graph_store.client.session() as session:
+        with graph_store._driver.session() as session:
             result = session.run(cypher, src_ids=src_ids, tgt_ids=tgt_ids)
+            unique_signatures = set()
+            
             for record in result:
+                path_nodes = record["path_nodes"]
+                relations = record["relations"]
+                
+                # Generate a signature based on the actual data flow structure
+                # This dedups paths that only differ by their entry point (via HAS_ROLE)
+                flow_signature_parts = []
+                for i, rel in enumerate(relations):
+                    if rel == "FLOWS_TO":
+                         flow_signature_parts.append(f"{path_nodes[i]['name']}->{path_nodes[i+1]['name']}")
+                
+                signature = "|".join(flow_signature_parts)
+                # If no flows_to (shouldn't happen due to WHERE), use full path
+                if not signature:
+                    signature = str(path_nodes)
+
+                if signature in unique_signatures:
+                    continue
+                unique_signatures.add(signature)
+                
+                if len(found_paths) >= 3:
+                    break
+
                 path_data = {
                     "source_query": source_text,
                     "target_query": target_text,
                     "path_nodes": record["path_nodes"],
-                    "relations": record["relations"]
+                    "relations": record["relations"],
+                    "rel_props": record["rel_props"]
                 }
                 found_paths.append(path_data)
 
@@ -215,170 +244,6 @@ def find_structural_path(source_text, target_text, vector_store, graph_store, re
 
     
     return found_paths
-
-def extract_role_category(role_str):
-    """
-    Extract category from role string (format: "category: subcategory")
-    Returns: category string or None
-    """
-    if not role_str or ':' not in role_str:
-        return None
-    return role_str.split(':', 1)[0].strip()
-
-def analyze_skeleton_roles(skeleton_node, graph_store):
-    """
-    Analyze the role distribution in a skeleton (WORKFLOW node).
-    Returns a dict with role category counts and suggested complementary roles.
-    
-    Args:
-        skeleton_node: NodeWithScore object containing a WORKFLOW node
-        graph_store: Neo4j graph store
-    
-    Returns:
-        {
-            'role_counts': {'processing_core': 3, 'sensing_input': 1, ...},
-            'suggested_roles': ['interface_output', ...],  # roles to complement
-            'dominant_category': 'processing_core'
-        }
-    """
-    print(f"\n📊 Analyzing skeleton role distribution for: {skeleton_node.node.metadata.get('name', 'Unknown')}")
-    
-    skeleton_id = skeleton_node.node.id_
-    role_counts = {}
-    module_roles = []
-    
-    # Query to get all modules in this workflow's module_seq
-    cypher = """
-    MATCH (wf:LlamaNode {id: $wf_id})-[:EXECUTES_STEP]->(mod:LlamaNode)
-    WHERE mod.type = 'MODULE'
-    RETURN mod.role as role, mod.name as name
-    ORDER BY mod.name
-    """
-    
-    with graph_store._driver.session() as session:
-        result = session.run(cypher, wf_id=skeleton_id)
-        for record in result:
-            role = record.get("role", "")
-            name = record.get("name", "")
-            module_roles.append(role)
-            
-            category = extract_role_category(role)
-            if category:
-                role_counts[category] = role_counts.get(category, 0) + 1
-                print(f"   - {name}: {role} → category: {category}")
-    
-    # Find dominant category
-    dominant_category = max(role_counts.items(), key=lambda x: x[1])[0] if role_counts else None
-    
-    # Suggest complementary roles based on ROLE_COLLABORATION graph
-    suggested_roles = []
-    for category in role_counts.keys():
-        if category in ROLE_COLLABORATION:
-            for complementary in ROLE_COLLABORATION[category]:
-                if complementary not in role_counts or role_counts[complementary] == 0:
-                    if complementary not in suggested_roles:
-                        suggested_roles.append(complementary)
-    
-    print(f"   ✓ Role distribution: {role_counts}")
-    print(f"   ✓ Dominant category: {dominant_category}")
-    print(f"   ✓ Suggested complementary roles: {suggested_roles}")
-    
-    return {
-        'role_counts': role_counts,
-        'suggested_roles': suggested_roles,
-        'dominant_category': dominant_category,
-        'all_module_roles': module_roles
-    }
-
-def retrieve_with_far_hop(anchors_list, vector_store, graph_store, skeleton_analysis=None, 
-                          strategy="complementary", top_k=3, context=""):
-    """
-    Far-hop retrieval: supplement user's anchors with modules from related but different role categories.
-    
-    Args:
-        anchors_list: list of anchor dicts with 'user_term', 'description', 'role'
-        vector_store: vector store
-        graph_store: graph store
-        skeleton_analysis: optional dict from analyze_skeleton_roles()
-        strategy: 'complementary' (based on skeleton) or 'diverse' (explore different categories)
-        top_k: number of results per anchor
-        context: (str) Domain context or original user query to make retrieval specific
-    
-    Returns:
-        dict mapping anchor names to retrieved nodes, PLUS additional complementary modules
-    """
-    print(f"\n🔭 Far-hop Retrieval (strategy: {strategy})")
-    
-    anchor_mapping = {}
-    user_role_categories = set()
-    
-    # First, do normal retrieval for user's anchors (近跳部分)
-    for anchor in anchors_list:
-        user_term = anchor["user_term"]
-        description = anchor["description"]
-        role = anchor.get("role", None)
-        query_text = f"{user_term}: {description}"
-        
-        # Extract category from user's specified role
-        if role:
-            category = extract_role_category(role)
-            if category:
-                user_role_categories.add(category)
-        
-        retrieved_nodes = retrieve_and_get_content(
-            query_text, 
-            vector_store, 
-            graph_store, 
-            top_k,
-            node_type="MODULE",
-            role_filter=role
-        )
-        
-        if retrieved_nodes:
-            anchor_mapping[user_term] = retrieved_nodes
-            print(f"   ✓ Retrieved {len(retrieved_nodes)} modules for anchor '{user_term}'")
-    
-    # Now, the FAR-HOP part: retrieve complementary modules
-    complementary_roles = []
-    
-    if strategy == "complementary" and skeleton_analysis:
-        # Use skeleton's suggested roles
-        complementary_roles = skeleton_analysis.get('suggested_roles', [])
-        print(f"   → Complementary strategy: using skeleton-suggested roles {complementary_roles}")
-        
-    elif strategy == "diverse":
-        # Explore categories NOT in user's anchors
-        all_categories = set(ROLE_COLLABORATION.keys())
-        unexplored = all_categories - user_role_categories
-        complementary_roles = list(unexplored)
-        print(f"   → Diverse strategy: exploring unexplored categories {complementary_roles}")
-    
-    # Retrieve modules from complementary roles
-    for comp_role_category in complementary_roles[:2]:  # Limit to 2 complementary categories
-        # Create a specific query combining Domain Context + Target Role
-        if context:
-            query_text = f"{context} {comp_role_category.replace('_', ' ')}"
-        else:
-            query_text = f"module for {comp_role_category.replace('_', ' ')}"
-            
-        print(f"   🔍 Far-hop Query: '{query_text}'")
-
-        retrieved_nodes = retrieve_and_get_content(
-            query_text,
-            vector_store,
-            graph_store,
-            top_k=2,  # Fewer results for补充 modules
-            node_type="MODULE",
-            role_filter=comp_role_category  # Filter by category (partial match in Cypher)
-        )
-        
-        if retrieved_nodes:
-            # Add as a "补充" anchor
-            comp_anchor_name = f"[Complementary] {comp_role_category}"
-            anchor_mapping[comp_anchor_name] = retrieved_nodes
-            print(f"   ✓ Added {len(retrieved_nodes)} complementary modules for '{comp_role_category}'")
-    
-    return anchor_mapping
 
 
 if __name__ == "__main__":

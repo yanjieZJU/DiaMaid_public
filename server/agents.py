@@ -6,9 +6,7 @@ from openai import OpenAI
 from retriever_neo4j import (
     load_stores, 
     retrieve_and_get_content, 
-    find_structural_path,
-    analyze_skeleton_roles,
-    retrieve_with_far_hop
+    find_structural_path
 )
 
 http_client = httpx.Client(proxy=None, trust_env=False)
@@ -18,72 +16,78 @@ client = OpenAI(
     http_client=http_client
 )
 
-STANDARD_IO_MAP = {
-    "text",
-    "image",
-    "video",
-    "audio",
-    "structured_data",
-    "user_interaction"
-}
+TAXONOMY = """
+1. **user_entity**
+    - target_user: the user who is the final user of the system
+    - stakeholder: observer or assistant, e.g., instructor, researcher
+2. **sensing_input**
+    - bio_sensor: internal human physiological signals, e.g., EEG, EMG, ECG
+    - behavior_sensor: exernal human behaviors/movements. e.g., IMU, eye tracker, motion capture
+    - env_sensor: environment perception, e.g., RGB Camera, temperature sensor
+    - direct_input: direct human-computer interaction input based on interfaces, e.g., Keyboard, Mouse, Touchscreen
+3. **processing_core**
+    - signal_optimization: making the signal cleaner without changing the data type, e.g., filter, normalizer
+    - feature_extraction: convert raw high-dimensional data (images, audio streams) into structured features or symbolic representations, e.g., gaze tracker, pose estimator, speech-to-text
+    - state_assessment: qualitative or quantitative evaluation of the extracted features (judge how good/bad/intense something is), e.g., emotion recognition, fatigue detection
+    - decision_logic: determine the next step based on the state assessment, e.g., recommender logic, dialog manager (even if it uses an LLM, if the output is a control flag or strategy, it belongs here)
+    - content_generation: e.g., text generation (llm, chatbot), image generation (diffusion model)
+4. **interface_output**
+    - immersive_display: immersive visual output, e.g., VR headset, AR glasses, Unity Scene
+    - gui_display: traditional visual display, e.g., Web UI, Mobile screen
+    - haptic_feedback: e.g., Vibration motors, exoskeleton feedback
+    - audio_output: e.g., TTS, Sound effects
+5. **infrastructure**
+    - data_storage: storage unit, e.g., vector DB, Database, Knowledge graph
+    - communication: e.g., HTTP Server, WebSocket, Bluetooth
+"""
 
 class PlannerAgent:
-    def __init__(self, client):
+    def __init__(self, client, graph_store):
         self.client = client
+        self.graph_store = graph_store  
 
-    def extract_struture_from_mermaid(self, mermaid_text):
+    def extract_arch(self, user_query):
         """
-        Extract the explicit topological structure using regular expressions
+        Extract explicit architecture from user query.
+
+        Args:
+            user_query (str): The user query.
+
+        Returns:
+            dict: The extracted architecture.
         """
-        relations = []
-        patten = re.compile(r"(\w+)\s*(?:-->|-\.->|==>|--o)\s*\|?.*?\|?\s*(\w+)")
-        matches = patten.findall(mermaid_text)
-        for src, tgt in matches:
-            relations.append({
-                "source": src,
-                "target": tgt,
-                "type": "explicit"
-            })
-
-        return relations
-
-    def plan_system_architecture(self, user_query):
         prompt = f"""
-        You are a system architect and requirement analyst.
-        ## Task
-        Given a user query with a user-constructed workflow, output its normalized structure in JSON code.
-        1. Identify mandatory components (anchors) and the conenction topology (including parallel connections, data flows, subgraphs, etc. if any) from user query. It might involve the functions that need to be implemented, the technical modules, fixed inputs/outputs, etc.
-        2. Complete the design goal based on these anchors and relations which were not originally included in the original query.
-        3. For each anchor: based on the user's requirements and the current context, infer the user's expectations for each anchor (their role within the entire workflow), and formulate a concise description.
-        4. Extract ALL user defined relations (explicit) from the user query. For example, the arrow '-->' means the data flow from source to target, the use of subgraph means the inclusion relationship. DO NOT REPEAT.
-        5. For each anchor, you must also infer its functional role based on the following taxonomy:
-           - user_entity: target_user, stakeholder
-           - sensing_input: bio_sensor (internal human physiological signals, e.g., EEG, EMG, ECG), behavior_sensor (external human behavior/movements, e.g., IMU, eye tracker), env_sensor (environmental signals, e.g., RGB Camera), direct_input (direct human-computer interaction input)
-           - processing_core: signal_optimization, feature_extraction, state_assessment, decision_logic, content_generation
-           - interface_output: immersive_display, gui_display, haptic_feedback, audio_output
-           - infrastructure: data_storage, communication
-           (Output the Level 1 category, or 'Level 1: Level 2' if you are sure)
-        Output Structure (in JSON format)
-        {{
-            "design_goal": "...",
-            "anchors": [
-                {{
-                    "user_term": "the user term for this anchor, e.g., AI tutor",
-                    "role": "the role of this anchor, choose from [user_entity, sensing_input, processing_core, interface_output, infrastructure]",
-                    "description": "the description of this anchor, e.g., answer questions about the user's topic."
-                }}
-            ],
-            "relations":[
-                {{
-                    "source": "the source anchor of this relation, e.g., AI tutor",
-                    "target": "the target anchor of this relation, e.g., user",
-                    "type": "the type of this relation, e.g., DATAFLOW, CONTAINS"
-                }}
-            ]
-        }}
+            You are a system architect and requirement analyst.
+            ## Task
+            Given a user query with a user-constructed workflow, output its normalized structure in JSON code.
+            1. Identify mandatory components (anchors) and the conenction topology (including parallel connections, data flows, subgraphs, etc. if any) from user query. It might involve the functions that need to be implemented, the technical modules, fixed inputs/outputs, etc.
+            2. Complete the design goal based on these anchors and relations which were not originally included in the original query.
+            3. For each anchor: based on the user's requirements and the current context, infer the user's expectations for each anchor (their role within the entire workflow), and formulate a concise description.
+            4. Extract ALL user defined relations (explicit) from the user query. For example, the arrow '-->' means the data flow from source to target, the use of subgraph means the inclusion relationship. DO NOT REPEAT.
+            5. For each anchor, you must also infer its functional role based on the following taxonomy:
+            {TAXONOMY}\n\n
+            (Output the Level 1 category, or 'Level 1: Level 2' if you are sure)
+            Output Structure (in JSON format)
+            {{
+                "design_goal": "...",
+                "anchors": [
+                    {{
+                        "user_term": "the user term for this anchor, e.g., AI tutor",
+                        "role": "the role of this anchor, choose from [user_entity, sensing_input, processing_core, interface_output, infrastructure]",
+                        "description": "the description of this anchor, e.g., answer questions about the user's topic."
+                    }}
+                ],
+                "relations":[
+                    {{
+                        "source": "the source anchor of this relation, e.g., AI tutor",
+                        "target": "the target anchor of this relation, e.g., user",
+                        "type": "the type of this relation, e.g., DATAFLOW, CONTAINS"
+                    }}
+                ]
+            }}
 
-        User Query: {user_query}
-    """
+            User Query: {user_query}
+        """
         try:
             response = self.client.chat.completions.create(
                 model="gpt-4o",
@@ -102,22 +106,91 @@ class PlannerAgent:
             print("Failed to parse JSON response.")
             return None
         
-    def generalize_domain(self, query):
+    def divergent_planning(self, user_query, base_anchors, num_outputs=2):
+        """
+        Generates divergent extension plans based on the user query and already extracted base anchors.
+        
+        Args:
+            user_query (str): The original user query.
+            base_anchors (list): List of anchors already extracted by extract_arch.
+            num_outputs (int): The number of distinct divergent plans to generate.
+
+        Returns:
+            list: A list of dicts, each containing 'perspective' and 'additional_anchors'.
+        """
+        
+        # Format base anchors for the prompt
+        base_anchors_str = json.dumps([a['user_term'] for a in base_anchors], ensure_ascii=False)
+        
         prompt = f"""
-        You're going to analyze the user query and generalize the structure/domain of the query.
-        e.g., history education system --> education system/interactive learning system
-        User Query: {query}
-    """
+        You are a creative System Architect.
+        
+        ## Context
+        The user wants to design a system described as: ```{user_query}```.
+        We have already identified the following BASE components (Anchors): ```{base_anchors_str}```.
+        
+        ## Task
+        Generate **{num_outputs}** DISTINCT and DIVERGENT extension plans to enhance this system. 
+        
+        ## Requirements
+        1. **Distinct Perspectives**: 
+           - Each plan should explore a DIFFERENT technical perspective or feature set that complements the base components.
+           - Based on the new perspectives, you can either supplement the existing anchors with additional details or introduce new modules.
+           - Your expansion should be based on user needs, and should supplement and improve the current process form different perspectives, so as to make it have more specific processing methods and richer ditails and functions.
+        
+        2. **Incremental Only**: 
+           - Do NOT repeat the Base Anchors if there's no need to modify or improve them. 
+           - Output ONLY the ADDITIONAL components (modules) needed for the extension.
+           
+        3. **Specific Anchors**:
+           - Each additional component belongs to a ```function module``` and can be connected to the existing components. Before you output the final plan, please recheck if the data flow is correct and reasonable, and meet user needs.
+           - For each additional component, provide a specific 'user_term', a functional 'description', and a precise 'role'.
+
+        ### Role Taxonomy
+        {TAXONOMY}\n\n
+
+        ## Output Structure (JSON)
+        {{
+            "plans": [
+                {{
+                    "perspective": "Short title of the perspective (e.g., AI-Enhanced)",
+                    "rationale": "Why this extension adds value",
+                    "additional_anchors": [
+                        {{
+                            "user_term": "Specific Module Name",
+                            "description": "Functional description of what it does",
+                            "role": "category: subcategory"
+                        }}
+                    ]
+                }},
+                ... (total {num_outputs} plans)
+            ]
+        }}
+        """
+
+        print(f"\n🧠 Generating {num_outputs} divergent plans...")
         try:
             response = self.client.chat.completions.create(
                 model="gpt-4o",
                 messages=[{"role": "user", "content": prompt}],
-                temperature=0.7,
+                temperature=0.9, # Higher temperature for creativity
+                response_format={"type": "json_object"},
             ).choices[0].message.content
-            return response
+            
+            # print(f"LLM Response: {str(response)}")
+            result = json.loads(response)
+            plans = result.get("plans", [])
+            
+            # Validate output count
+            if len(plans) < num_outputs:
+                print(f"⚠️ Warning: LLM generated {len(plans)} plans, requested {num_outputs}.")
+            
+            return plans[:num_outputs]
+
         except Exception as e:
-            print(f"Error: {e}")
-            return None
+            print(f"❌ Error in divergent planning: {e}")
+            return []
+
         
         
         
@@ -229,24 +302,60 @@ class IntegratorAgent:
     def __init__(self, client):
         self.client = client
 
+    def format_hints(self, structural_hints):
+        if not structural_hints:
+            return ""
+        
+        hints_text = "### Validated Connection Paths from Literature\n"
+        for i, path in enumerate(structural_hints):
+            chain_desc = []
+            nodes = path['path_nodes']
+            rels = path.get('relations', [])
+            rel_props = path.get('rel_props', [])
+            
+            # Build chain description
+            chain_desc.append(f"[{nodes[0]['name']}]")
+            for j, rel in enumerate(rels):
+                target_node = nodes[j+1]['name']
+                
+                # Extract edge label if available
+                data_content = ""
+                if j < len(rel_props) and rel_props[j] and 'edge_label' in rel_props[j]:
+                    lbl = rel_props[j]['edge_label']
+                    if lbl and lbl != "null":
+                        data_content = f": {lbl}"
+
+                if rel == "FLOWS_TO":
+                    chain_desc.append(f" --(flows to{data_content})--> [{target_node}]")
+                elif rel == "HAS_ROLE":
+                        chain_desc.append(f" ==(equivalent role)==> [{target_node}]")
+                else:
+                        chain_desc.append(f" --({rel}{data_content})--> [{target_node}]")
+
+            hints_text += f"   * Connection '{path['source_query']} -> {path['target_query']}':\n"
+            hints_text += f"     Reference Path: {''.join(chain_desc)}\n"
+            
+            # Smartly extract intermediate suggestions
+            # Only suggest nodes that are part of a data flow (outgoing relation is FLOWS_TO)
+            # This filters out nodes that are just role-equivalence jumps
+            real_intermediates = []
+            for k in range(1, len(nodes)-1):
+                if k < len(rels) and rels[k] == "FLOWS_TO":
+                        real_intermediates.append(nodes[k]['name'])
+
+            if real_intermediates:
+                hints_text += f"Suggestion: You might need intermediate modules like: {', '.join(real_intermediates)}\n"
+        hints_text += "\n"
+        return hints_text
+    
     def integrate_arch(self, query, skeletons, retrieved_info, structural_hints=[]):
         skeletons_text = ""
         if skeletons:
             for i, s in enumerate(skeletons):
                 skeletons_text += f"--- Skeleton {i} ---\n {s.node.text}\n\n"
 
-        hints_text = ""
-        if structural_hints:
-            hints_text = "### Validated Connection Paths from Literature\n"
-            for i, path in enumerate(structural_hints):
-                nodes_chain = " -> ".join([f"[{n['name']}]" for n in path['path_nodes']])
-                hints_text += f"   * For connection '{path['source_query']} -> {path['target_query']}':\n"
-                hints_text += f"     Reference Path: {nodes_chain}\n"
-                # 提取中间节点作为建议
-                if len(path['path_nodes']) > 2:
-                    middle_nodes = path['path_nodes'][1:-1]
-                    hints_text += f"     💡 Suggestion: You might need intermediate modules like: {', '.join([m['name'] for m in middle_nodes])}\n"
-            hints_text += "\n"
+        hints_text = self.format_hints(structural_hints)
+
         prompt = f"""
         You are a professional designer and researcher in the field of HCI. Design a complete pipeline based on the user's requirements and the retrieved information.
         ## User Requirements
@@ -442,12 +551,12 @@ class DrawerAgent:
             
 def run_pipeline(user_query, num_outputs=3):
     vector_store, graph_store = load_stores()
-    planner = PlannerAgent(client)
+    planner = PlannerAgent(client, graph_store)
     retriever = RetrieverAgent(vector_store, graph_store, client)
     integrator = IntegratorAgent(client)
     drawer = DrawerAgent(client)
 
-    arch_plan = planner.plan_system_architecture(user_query)
+    arch_plan = planner.extract_arch(user_query)
     # print(arch_plan)
     skeletons = retriever.retrieve_for_skeleton(arch_plan["design_goal"])
     filtered_skeletons = retriever.rerank_with_llm(user_query, skeletons)
@@ -457,109 +566,108 @@ def run_pipeline(user_query, num_outputs=3):
     
     results = []
     structural_hints = retriever.retrieve_structure_paths(user_relations)
+    
+    # Print structural hints once
+    if structural_hints:
+        print(integrator.format_hints(structural_hints))
 
-    # === Generate options with DIFFERENT retrieval strategies ===
-    STRATEGIES = [
-        "close-hop",            # Option 1: Precise matching
-        "far-hop-complementary",# Option 2: Skeleton-based extension
-        "far-hop-diverse"       # Option 3: Cross-category exploration
-    ]
+    # === Pre-calculate Divergent Plans for ALL Options ===
+    # Notice: We generate divergent plans for ALL requested outputs
+    divergent_plans = planner.divergent_planning(
+        user_query=user_query,
+        base_anchors=arch_plan["anchors"],
+        num_outputs=num_outputs
+    )
 
-    for i, s in enumerate(target_skeletons):
-        # Determine strategy based on index (cyclic if num_outputs > 3)
-        strategy_type = STRATEGIES[i % len(STRATEGIES)]
+    # === Step 1: Global Retrieval for Base Anchors (Higher Recall) ===
+    print(f"\n🎯 Retrieving Base Anchors (Top-6 for richer context)...")
+    base_nodes_map = retriever.retrieve_for_module(arch_plan["anchors"], top_k=6)
+    
+    # Process base nodes into standard format
+    base_ref_info = {}
+    for anchor_name, retrieved_list in base_nodes_map.items():
+        anchor_nodes = []
+        for node_with_score in retrieved_list:
+            # Handle potential None result if retrieval failed partially
+            if not node_with_score: continue
+            
+            node = node_with_score.node
+            anchor_nodes.append({
+                'id': node.id_,
+                'text': node.text,
+                'score': node_with_score.score,
+                'structural_path': node.metadata.get('topology', None),
+                'metadata': dict(node.metadata)
+            })
+        base_ref_info[anchor_name] = anchor_nodes
+
+    # === Generate Options ===
+    # TODO: skeleton在这里的作用先暂时忽略，可能后续作为divergent_planner的参考
+    for i in range(num_outputs):
+        # Use skeletons cyclically if we have fewer skeletons than requested outputs
+        # skeleton_idx = i % len(target_skeletons)
+        # s = target_skeletons[skeleton_idx]
         
         print(f"\n{'='*60}")
-        print(f"=== Generating Option {i+1} using Skeleton {i} ===")
-        print(f"{'='*60}")
-        print(f"Skeleton Preview: {s.node.text[:100]}...\n")
+        # print(f"=== Generating Option {i+1} using Skeleton {skeleton_idx} ===")
+        print(f"{divergent_plans[i]}\n")
         
-        ref_nodes_map = {}
-        
-        if strategy_type == "close-hop":
-            # === Option 1: Close-hop (Near-hop) - Precise matching ===
-            print("🎯 Strategy: CLOSE-HOP (Precise role matching)")
-            print("   → Retrieving modules exactly matching user's anchor roles\n")
-            
-            ref_nodes_map = retriever.retrieve_for_module(arch_plan["anchors"])
-            
-            # Filter empty results for logging clarity
-            for anchor in arch_plan["anchors"]:
-                anchor_name = anchor["user_term"]
-                if anchor_name not in ref_nodes_map:
-                    print(f"   ⚠️  No modules found for anchor: {anchor_name}")
-        
-        elif strategy_type == "far-hop-complementary":
-            # === Option 2: Far-hop with Skeleton-aware Complementary Retrieval ===
-            print("🔭 Strategy: FAR-HOP (Skeleton-aware complementary)")
-            
-            # Analyze skeleton's role distribution
-            skeleton_analysis = analyze_skeleton_roles(s, graph_store)
-            
-            print(f"   → Retrieving user anchors + complementary modules based on skeleton\n")
-            
-            # Use far-hop retrieval with complementary strategy
-            ref_nodes_map = retrieve_with_far_hop(
-                arch_plan["anchors"],
-                vector_store,
-                graph_store,
-                skeleton_analysis=skeleton_analysis,
-                strategy="complementary",
-                top_k=3,
-                context=arch_plan["design_goal"]
-            )
-        
-        elif strategy_type == "far-hop-diverse":
-            # === Option 3: Far-hop with Diverse Cross-category Exploration ===
-            print("🌐 Strategy: FAR-HOP (Diverse cross-category exploration)")
-            print(f"   → Retrieving user anchors + diverse modules from unexplored categories\n")
-            
-            # Use far-hop retrieval with diverse strategy
-            ref_nodes_map = retrieve_with_far_hop(
-                arch_plan["anchors"],
-                vector_store,
-                graph_store,
-                skeleton_analysis=None,  # Don't use skeleton for diverse strategy
-                strategy="diverse",
-                top_k=3,
-                context=arch_plan["design_goal"]
-            )
-            
-        # Common processing for retrieved nodes
-        ref_info = {}
-        for anchor_name, retrieved_list in ref_nodes_map.items():
-            anchor_nodes = []
-            for node_with_score in retrieved_list:
-                node = node_with_score.node
-                anchor_nodes.append({
-                    'id': node.id_,
-                    'text': node.text,
-                    'score': node_with_score.score
-                })
-            ref_info[anchor_name] = anchor_nodes
+        current_ref_info = base_ref_info.copy()
 
-        print(f"\n📦 Retrieved modules summary for Option {i+1}:")
-        for anchor_name, nodes in ref_info.items():
-            is_complementary = anchor_name.startswith("[Complementary]")
-            symbol = "   🆕" if is_complementary else "   ✓"
-            print(f"{symbol} {anchor_name}: {len(nodes)} modules")
+        # Apply Divergent Plan (if available)
         
-        # Generate architecture using the retrieved modules
+        d_plan = divergent_plans[i]
+        additional_anchors = d_plan.get("additional_anchors", [])
+        perspective = d_plan.get("perspective", "Enhanced")
+        rationale = d_plan.get("rationale", "")
+        
+        print(f"Applying Divergent Perspective: {perspective}")
+        print(f"Rationale: {rationale}")
+        
+        if additional_anchors:
+            additional_map = retriever.retrieve_for_module(additional_anchors, top_k=3)
+            for anchor_name, retrieved_list in additional_map.items():
+                current_ref_info[anchor_name] = []
+                for node_with_score in retrieved_list:
+                    node = node_with_score.node
+                    current_ref_info[anchor_name].append({
+                        'id': node.id_,
+                        'text': node.text,
+                        'score': node_with_score.score,
+                        'structural_path': node.metadata.get('topology', None),
+                        'metadata': dict(node.metadata)
+                    })
+        else:
+            print(f"No additional anchors suggested for this plan")
+
+        additional_desc = f"Perspective: {perspective}\nRationale: {rationale}\n"
+        
+        print(f"\n📦 Retrieved modules summary for Option {i+1}:")
+        print(f"Base Anchors: {len(base_ref_info)} keys")
+        print(f"Total Anchors: {len(current_ref_info)} keys")
+        
+        # Generate architecture using the MERGED retrieved modules
         new_arch = integrator.integrate_arch(
-            query=user_query, 
-            skeletons=[s], 
-            retrieved_info=ref_info, 
+            query=user_query+"; Perspective: "+d_plan.get("perspective", "")+"; Rationale: "+d_plan.get("rationale", ""), 
+            # skeletons=[s],
+            skeletons=None, 
+            retrieved_info=current_ref_info, 
             structural_hints=structural_hints
         )
         
         if new_arch:
             mermaid_code = drawer.draw_flowchart(new_arch)
+            
+            # Add perspective info to description
+            raw_desc = json.loads(new_arch).get("overall_description", "")
+            final_desc = additional_desc + raw_desc
+                
             results.append({
                 "option_id": i + 1,
-                "strategy": ["close-hop", "far-hop-complementary", "far-hop-diverse"][i],
-                "based_on_skeleton_score": s.score,
+                "perspective": perspective,
+                # "based_on_skeleton_score": s.score,
                 "mermaid_code": mermaid_code,
-                "description": json.loads(new_arch).get("overall_description", "") if new_arch else ""
+                "description": final_desc
             })
             print(f"\n--- Mermaid Code (Option {i+1}) ---\n{mermaid_code}\n")
         else:
@@ -569,7 +677,7 @@ def run_pipeline(user_query, num_outputs=3):
 
 
 if __name__ == "__main__":
-    query = "design a physical education system based on LLM. Nodes: graph TD;\n Trainee[Trainee]-->|user data| Sensor[Sensor]\n LLM[LLM]-->|LLM output| Virtual Reality\n;"
+    query = "design a physical education system based on LLM. Nodes: graph TD;\n Trainee[Trainee]-->|user data| Sensor[Sensor]\n;"
     results = run_pipeline(query, num_outputs=3)
     for res in results:
         print(f"\nFinal Result {res['option_id']}:\n{res['mermaid_code']}")
