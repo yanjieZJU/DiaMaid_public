@@ -1,0 +1,14 @@
+/* client/src/App.css 的最顶端 */
+
+/* 1. 强制重置根元素，覆盖 Vite/React 默认的 max-width 限制 */
+:root, body, #root {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  max-width: none !important; /* 关键：取消最大宽度限制 */
+  text-align: left; /* 取消默认居中 */
+  overflow: hidden; /* 防止出现双滚动条 */
+}
+
+/* ... 接着是你之前的样式 ... */

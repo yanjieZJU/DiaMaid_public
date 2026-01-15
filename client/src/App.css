@@ -1,0 +1,237 @@
+/* client/src/App.css */
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  background-color: #eef0f4; /* 整体背景灰 */
+  height: 100vh;
+  overflow: hidden;
+}
+
+.app-container {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  width: 100vw;
+}
+
+/* 顶部导航 */
+header {
+  background-color: #fff;
+  padding: 0 20px;
+  height: 50px;
+  display: flex;
+  align-items: center;
+  border-bottom: 1px solid #ddd;
+  flex-shrink: 0;
+}
+
+header h1 {
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: #333;
+}
+
+/* --- 核心布局区域 --- */
+.main-content {
+  flex: 1;
+  overflow: hidden; /* 防止出现双滚动条 */
+  padding: 15px;
+}
+
+.generator-layout {
+  display: grid;
+  /* 关键：定义三列宽度 [左侧固定] [中间自适应] [右侧自适应] */
+  grid-template-columns: 320px 1fr 1fr; 
+  grid-template-rows: 100%;
+  gap: 15px;
+  height: 100%;
+}
+
+/* 通用面板样式 */
+.panel {
+  background: white;
+  border-radius: 8px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden; /* 内部滚动 */
+}
+
+/* --- 左侧边栏布局 --- */
+.sidebar-left {
+  /* 左侧内部也分为上中下，或者垂直排列 */
+  display: flex;
+  flex-direction: column;
+  gap: 15px;
+  background-color: transparent; /* 左侧本身透明，里面的卡片白色 */
+  box-shadow: none; 
+}
+
+/* 左侧的小卡片 */
+.left-card {
+  background: #fff;
+  padding: 15px;
+  border-radius: 8px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+  display: flex;
+  flex-direction: column;
+}
+
+.card-title {
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: #444;
+  margin-bottom: 10px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+/* 文本域美化 */
+textarea.styled-input {
+  width: 100%;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  padding: 8px;
+  resize: none;
+  font-family: inherit;
+  font-size: 0.9rem;
+  background: #fafafa;
+}
+
+textarea.styled-input:focus {
+  outline: none;
+  border-color: #2196F3;
+  background: #fff;
+}
+
+/* 代码编辑器特定样式 */
+.code-editor-area {
+  font-family: 'Consolas', 'Monaco', monospace;
+  font-size: 12px;
+  background-color: #2d2d2d !important;
+  color: #f8f8f2;
+  flex-grow: 1; /* 让代码区占据剩余高度 */
+  min-height: 200px;
+}
+
+/* 按钮组 */
+.action-bar {
+  display: flex;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.btn-primary {
+  width: 100%;
+  padding: 10px;
+  background-color: #217cf3;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-weight: 500;
+}
+.btn-primary:hover { background-color: #555; }
+.btn-primary:disabled { background-color: #ccc; cursor: not-allowed; }
+
+.btn-add {
+  padding: 0 15px;
+  background: #217cf3;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+/* 手动节点列表 */
+.manual-nodes-container {
+  margin-top: 10px;
+  max-height: 100px;
+  overflow-y: auto;
+  border: 1px dashed #eee;
+  padding: 5px;
+}
+
+.tag-node {
+  display: inline-flex;
+  align-items: center;
+  background: #e3f2fd;
+  color: #1565c0;
+  padding: 4px 8px;
+  border-radius: 12px;
+  font-size: 0.8rem;
+  margin: 2px;
+}
+
+.tag-remove {
+  margin-left: 5px;
+  cursor: pointer;
+  color: #ef5350;
+  font-weight: bold;
+}
+
+/* --- 中间画布区域 --- */
+.canvas-panel {
+  position: relative;
+  background-color: #f8f9fa;
+  border: 1px solid #e0e0e0;
+  /* 网格背景效果 */
+  background-image: radial-gradient(#cbd5e0 1px, transparent 1px);
+  background-size: 20px 20px;
+}
+
+.canvas-overlay {
+  /* position: absolute;  <-- 移除 absolute，让它自然填充 */
+  /* top: 0; left: 0; right: 0; bottom: 0; */
+  /* pointer-events: none; <-- 移除，因为现在它是唯一的交互层 */
+  z-index: 10;
+}
+
+/* 手动添加的节点样式 (悬浮在图表之上) */
+.manual-node-visual {
+  position: absolute;
+  background: #fff;
+  border: 2px solid #2196F3;
+  color: #333;
+  padding: 8px 16px;
+  border-radius: 4px;
+  box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+  font-size: 0.9rem;
+  font-weight: 600;
+  pointer-events: auto; /* 允许拖拽 */
+  cursor: move;
+  z-index: 20;
+}
+
+/* Mermaid 图表容器 */
+.mermaid-wrapper {
+  width: 100%;
+  height: 100%;
+  overflow: auto;
+  display: flex;
+  justify-content: center;
+  align-items: center; /* 居中显示图表 */
+  padding: 40px;
+}
+
+/* --- 右侧边栏 --- */
+.sidebar-right {
+  padding: 15px;
+  background: #fff;
+  /* 允许右侧区域出现内部滚动条，而不是撑开整个页面 */
+  overflow: hidden; 
+}
+
+.info-placeholder {
+  color: #999;
+  font-size: 0.9rem;
+  text-align: center;
+  margin-top: 50px;
+  line-height: 1.5;
+}

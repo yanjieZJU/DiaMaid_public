@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+openai
+pydantic
+httpx
+llama-index-core
+llama-index-llms-openai
+llama-index-embeddings-openai
+llama-index-graph-stores-neo4j
