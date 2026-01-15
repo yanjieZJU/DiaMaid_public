@@ -4,6 +4,17 @@ import mermaid from 'mermaid';
 
 const MermaidDiagram = ({ code, onLayoutChange, onNodeClick }) => {
   const elementRef = useRef(null);
+  
+  // 处理背景点击，清除选中
+  const handleBackgroundClick = (e) => {
+      // 只有直接点击 svg 或容器时才触发
+      // 这里的逻辑可能需要根据实际 DOM 结构调整
+      // 目前简单起见，如果点击事件冒泡到这里，我们就认为点击了空白处
+      // 但由于节点点击已经 stopPropagation，所以这里接收到的应该是背景点击
+      if (onNodeClick) {
+          onNodeClick(null); // 传递 null 表示清除选中
+      }
+  };
 
   useEffect(() => {
     // 1. 初始化 mermaid 配置
@@ -120,7 +131,7 @@ const MermaidDiagram = ({ code, onLayoutChange, onNodeClick }) => {
                 // 传递更多信息回去
                 onLayoutChange({ positions, clusters });
               }
-            }, 100); // 稍微延迟确保 DOM 渲染完成
+            }, 300); // 增加延迟确保 DOM 渲染完成
           }
 
         } catch (error) {
@@ -136,7 +147,11 @@ const MermaidDiagram = ({ code, onLayoutChange, onNodeClick }) => {
   }, [code]); // 当 code 变化时重新渲染
 
   return (
-    <div className="diagram-container" style={{ border: '1px solid #ddd', padding: '20px', borderRadius: '8px', minHeight: '300px', backgroundColor: '#f9f9f9' }}>
+    <div 
+        className="diagram-container" 
+        style={{ border: '1px solid #ddd', padding: '20px', borderRadius: '8px', minHeight: '300px', backgroundColor: '#f9f9f9', cursor: 'default' }}
+        onClick={handleBackgroundClick}
+    >
       <div ref={elementRef} style={{ width: '100%', overflowX: 'auto' }} />
     </div>
   );

@@ -67,8 +67,13 @@ async def generate_mermaid(req: GenRequest):
        - 如果 allowRandomNodes 为 False (默认)：生成的流程图中只能包含 'userNodes' 中的节点，严禁添加任何额外的、用户未指定的节点。
        - 如果 allowRandomNodes 为 True (深度生成)：你可以在保留所有 'userNodes' 的基础上，根据 'user query' 的语境，智能添加必要的中间节点或辅助模块，以完善系统逻辑。
     5. 根据逻辑合理连接节点。
-    6. 只返回 Mermaid 代码字符串，不要包含 ```mermaid 或 ``` 这样的 Markdown 标记。
-    7. 默认使用 graph TD (从上到下) 布局。
+    6. [CRITICAL] 连线文字规范：
+       - 严禁将连线说明（如“数据流”、“控制信号”）作为节点名称的一部分。
+       - 连线说明必须放在 Mermaid 的连线语法中，例如 `A -->|说明文字| B`。
+       - 节点名称必须保持简洁，只包含实体名（如 "User", "Server"），不要包含动作描述。
+       - 如果用户在 prompt 中明确要求修改或隐藏连线文字，请遵照执行。
+    7. 只返回 Mermaid 代码字符串，不要包含 ```mermaid 或 ``` 这样的 Markdown 标记。
+    8. 默认使用 graph TD (从上到下) 布局。
     """
 
     user_message = f"""

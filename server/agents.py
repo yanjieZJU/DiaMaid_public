@@ -399,6 +399,10 @@ class DrawerAgent:
              subgraph A
                 B
              end
+           - [CRITICAL] Edge Labels:
+             - Put descriptive text ON THE EDGE, not inside the node name.
+             - Format: `NodeA -->|description| NodeB`
+             - Do NOT change the node ID or Label to include the description.
         4. Add appropriate styling or comments if helpful, but keep it clean.
         {strictness_prompt}
         6. Return ONLY the mermaid code string. No markdown block markers.
@@ -410,34 +414,39 @@ class DrawerAgent:
                 stream=False
             )
             content = response.choices[0].message.content
-            # Clean up potential markdown
-            content = content.replace("```mermaid", "").replace("```", "").strip()
-            return content
+            return self.clean_mermaid_code(content)
         except Exception as e:
             print(f"Error drawing flowchart: {e}")
             return "graph TD\nError[Generation Failed]"
         
     def clean_mermaid_code(self,code):
         """
-        清理Mermaid代码中的转义字符
+        清理Mermaid代码中的转义字符和Markdown标记
         """
-        # 替换转义字符
+        # 1. 尝试提取代码块
+        if '```mermaid' in code:
+            pattern = r"```mermaid\s*(.*?)\s*```"
+            match = re.search(pattern, code, re.DOTALL)
+            if match:
+                code = match.group(1)
+        elif '```' in code:
+            pattern = r"```\s*(.*?)\s*```"
+            match = re.search(pattern, code, re.DOTALL)
+            if match:
+                code = match.group(1)
+
+        # 2. 替换常见转义问题
         code = code.replace('\\n', '\n')
         code = code.replace('\\"', '"')
+        
+        # 3. 去除首尾空白
+        code = code.strip()
+        
+        # 4. 去除可能残留的引号（如果整个代码被包裹在引号中）
         if code.startswith('"') and code.endswith('"'):
             code = code[1:-1]
-        # 移除多余的空白字符
-        code = code.strip()
+            code = code.strip()
 
-        if '```mermaid' in code:
-            start = code.find('```mermaid') + len('```mermaid')
-            end = code.find('```', start)
-            code = code[start:end]
-        elif '```' in code:
-            parts = code.split('```')
-            if len(parts) > 2:
-                code = parts[1]
-        
         return code
             
 def run_pipeline(user_query, num_outputs=3, allow_random_nodes=False):

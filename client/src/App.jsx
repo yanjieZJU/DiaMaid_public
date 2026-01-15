@@ -37,11 +37,14 @@ function App() {
 
   const [useRandomNodes, setUseRandomNodes] = useState(false); // 是否使用随机节点（深度生成模式）
   const [selectedNodeInfo, setSelectedNodeInfo] = useState(null); // 当前选中节点的信息
+  const [editingNodeId, setEditingNodeId] = useState(null); // 当前正在编辑名称的节点ID
+  const [editingNodeLabel, setEditingNodeLabel] = useState(''); // 当前编辑的名称
 
   // --- React Flow 事件处理 ---
   
   // 节点点击事件
   const onNodeClick = useCallback((event, node) => {
+    event.stopPropagation(); // 防止触发 onPaneClick
     // 查找该节点的详细信息
     // node.data.label 是节点显示的名称
     const label = node.data.label;
@@ -351,10 +354,12 @@ function App() {
       const newNodes = [...prevNodes];
       
       // 标记已存在的节点
-      const existingLabels = new Set(newNodes.map(n => n.data.label));
+      const normalize = (str) => str ? str.trim() : '';
+      const existingLabels = new Set(newNodes.map(n => normalize(n.data.label)));
       
       Object.entries(positions).forEach(([label, pos]) => {
-        if (!existingLabels.has(label)) {
+        const normalizedLabel = normalize(label);
+        if (!existingLabels.has(normalizedLabel)) {
           // 如果是新节点，添加到画布
           // 检查这个节点是否属于某个 Cluster (Subgraph)
           // 这一步比较难，因为 Mermaid DOM 结构没有直接告诉我们节点属于哪个 cluster
@@ -370,7 +375,7 @@ function App() {
           
           // 如果是新生成的节点（不在 prevNodes 中），且 allowRandomNodes 为 true，给它一个不同的颜色
           // 注意：这里我们无法直接判断是否是 allowRandomNodes 生成的，但我们可以根据它不在 existingLabels 中推断
-          const isNewGenerated = !existingLabels.has(label);
+          const isNewGenerated = !existingLabels.has(normalizedLabel);
           
           // 如果用户选择不保留随机节点，且该节点是新生成的，则跳过添加
           // 注意：这里需要更细致的逻辑。如果我们在前端只是“显示”了蓝色节点，但用户没有点“保留”，
@@ -403,7 +408,7 @@ function App() {
           });
         } else {
           // 更新已存在节点的位置
-          const nodeIndex = newNodes.findIndex(n => n.data.label === label);
+          const nodeIndex = newNodes.findIndex(n => normalize(n.data.label) === normalizedLabel);
           if (nodeIndex !== -1) {
             const node = newNodes[nodeIndex];
             
@@ -522,6 +527,7 @@ function App() {
   };
 
   const handleMermaidNodeClick = useCallback((nodeName) => {
+      // 阻止冒泡需要在这个回调被调用的地方处理，这里只负责逻辑
       if (nodeName && nodeDetails[nodeName]) {
           setSelectedNodeInfo(nodeDetails[nodeName]);
       } else {
@@ -529,8 +535,34 @@ function App() {
       }
   }, [nodeDetails]);
 
+  // 开始编辑节点名称
+  const startEditing = (node) => {
+      setEditingNodeId(node.id);
+      setEditingNodeLabel(node.data.label);
+  };
+
+  // 完成编辑节点名称
+  const finishEditing = () => {
+      if (editingNodeId) {
+          if (editingNodeLabel.trim()) {
+              setNodes((nds) => nds.map((node) => {
+                  if (node.id === editingNodeId) {
+                      return { ...node, data: { ...node.data, label: editingNodeLabel.trim() } };
+                  }
+                  return node;
+              }));
+          }
+          setEditingNodeId(null);
+          setEditingNodeLabel('');
+      }
+  };
+
+  const closeNodeDetails = () => {
+    setSelectedNodeInfo(null);
+  };
+
   return (
-    <div className="app-container">
+    <div className="app-container" onClick={closeNodeDetails}>
       <header>
         <h1>DiaMaid - 智能流程图设计台</h1>
       </header>
@@ -669,12 +701,30 @@ function App() {
               </div>
               
               {/* 显示已添加的标签 */}
-              <div className="manual-nodes-container">
+              <div className="manual-nodes-container" onClick={(e) => e.stopPropagation()}>
                 {nodes.length === 0 && <span style={{color:'#ccc', fontSize:'12px'}}>暂无节点</span>}
                 {nodes.map(node => (
-                  <span key={node.id} className="tag-node">
-                    {node.data.label}
-                    <span className="tag-remove" onClick={() => removeNode(node.id)}>×</span>
+                  <span key={node.id} className="tag-node" onDoubleClick={() => startEditing(node)}>
+                    {editingNodeId === node.id ? (
+                        <input 
+                            autoFocus
+                            value={editingNodeLabel}
+                            onChange={(e) => setEditingNodeLabel(e.target.value)}
+                            onBlur={finishEditing}
+                            onKeyDown={(e) => e.key === 'Enter' && finishEditing()}
+                            style={{
+                                border: 'none', 
+                                outline: 'none', 
+                                background: 'transparent', 
+                                color: '#333', 
+                                width: '60px',
+                                fontSize: '12px'
+                            }}
+                        />
+                    ) : (
+                        node.data.label
+                    )}
+                    <span className="tag-remove" onClick={(e) => { e.stopPropagation(); removeNode(node.id); }}>×</span>
                   </span>
                 ))}
               </div>
@@ -726,6 +776,7 @@ function App() {
               onEdgesChange={onEdgesChange}
               onConnect={onConnect}
               onNodeClick={onNodeClick}
+              onPaneClick={closeNodeDetails} // 点击空白处关闭详情
               onNodeDragStop={onNodeDragStop}
               onEdgeDoubleClick={onEdgeDoubleClick}
               onInit={setReactFlowInstance}
