@@ -45,8 +45,8 @@ header h1 {
 
 .generator-layout {
   display: grid;
-  /* 关键：定义三列宽度 [左侧固定] [中间自适应] [右侧固定] */
-  grid-template-columns: 320px 1fr 280px; 
+  /* 关键：定义三列宽度 [左侧固定] [中间自适应] [右侧自适应] */
+  grid-template-columns: 320px 1fr 1fr; 
   grid-template-rows: 100%;
   gap: 15px;
   height: 100%;
@@ -187,9 +187,9 @@ textarea.styled-input:focus {
 }
 
 .canvas-overlay {
-  position: absolute;
-  top: 0; left: 0; right: 0; bottom: 0;
-  pointer-events: none; /* 让鼠标事件穿透到下层 */
+  /* position: absolute;  <-- 移除 absolute，让它自然填充 */
+  /* top: 0; left: 0; right: 0; bottom: 0; */
+  /* pointer-events: none; <-- 移除，因为现在它是唯一的交互层 */
   z-index: 10;
 }
 
@@ -224,6 +224,8 @@ textarea.styled-input:focus {
 .sidebar-right {
   padding: 15px;
   background: #fff;
+  /* 允许右侧区域出现内部滚动条，而不是撑开整个页面 */
+  overflow: hidden; 
 }
 
 .info-placeholder {
