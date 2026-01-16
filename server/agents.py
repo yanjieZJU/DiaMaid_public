@@ -638,69 +638,35 @@ class DrawerAgent:
         self.client = client
     
     def draw_flowchart(self, arch_plan):
+
         prompt = f"""
+        You are a Mermaid code generator.
         ## Task
-        Translate the given system architecture/pipeline into a Mermaid flowchart.
-        ## The input structure:
-        {{
-            "overall_description": "...",
-            "module_details": [
-                "<module name>": {{
-                    "name": "the module name",
-                    "function": "the functions of this module",
-                    "technical_methods": "the technical methods used in this module",
-                    "references": "the definition code of this module in the reference paper.",
-                    "sub_nodes":[
-                        "<sub_node name (if any)>": {{
-                            "name": "the sub node name",
-                            "function": "the functions of this sub node",
-                            "technical_methods": "the technical methods used in this sub node",
-                        }}
-                    ],
-                    "ports": {{
-                        "incoming (if any)": [
-                            {{
-                                "source_mod": "the identifier of the incoming module",
-                                "source_node (if any)": "the identifier of the incoming node",
-                                "edge_label": "the label of the incoming edge, i.e., the meaning of the data flow",
-                            }}
-                        ],
-                        "outgoing (if any)": [
-                            {{
-                                "target_mod": "the identifier of the outgoing module",
-                                "target_node (if any)": "the identifier of the outgoing node",
-                                "edge_label": "the label of the outgoing edge, i.e., the meaning of the data flow",
-                            }}
-                        ]
-                    }}
-                }}
-            ]
-        }}
-        ## INTERPRETATION RULES:
-            1. **Keep align with the plan**: The flowchart should strictly follow the plan. 
-                a. Nodes are only represented by their ids and names, without any other information appearing in the diagram (including functions, technical methods, and references).
-                b. Use subgraphs to represent modules if there are **more than one subnodes and data flow between them** in a single module. DO NOT use subgraphs if there is only one node and the name of the node is the same as the module name.
-                c. The definition codes within the module are included in the "references" section, which should be contained in the code of the module (subgraph) if necessary.
-                d. The connection and data flow between nodes/modules should display through the label on the connection line.
-                e. Do not add any extra nodes or edges.
-            2. **Adhere strictly to the grammar of Mermaid**: ensure the final code does not generate any errors when compiled. 
-                a. Always enclose the labels with double quatation marks.
-                b. Do not include style attributes.
-            3. **Use the code in the reference with caution.** Modify the names and descriptions of each node and relationship according to the user's requirements and context, so that the user can fully understand this flowchart.
-
-        ## REFLECTION:
-        Before outputting the final code, please reflect and recheck the code.
-        1. The **subgraph** has been correctly defined and an end marker "end" has been added.
-        2. The name of each node (enclosed in parentheses or squares brackets) do not contain any other parentheses or brackets, or are correctly enclosed within double quotes.
-        3. NO style attributes, NO "click" events, NO "class" identification.
+        Convert the given system architecture (JSON) into a standard Mermaid flowchart code.
         
-        Final Output Structure (in JSON format)
-        {{
-            "mermaid_code": "...",
-        }}
-
-        ## The input plan:
+        ## Input Architecture
         {arch_plan}
+        
+        ## Requirements
+        1. Use 'graph TD' (top-down) layout.
+        2. Map 'anchors' to nodes. Use the 'user_term' as the node text.
+           - Ensure node IDs are simple and safe (e.g., Node1, Node2).
+           - Add descriptive labels if available.
+        3. Map 'relations' to edges.
+           - 'DATAFLOW' type -> arrow `-->`
+           - 'CONTAINS' type -> subgraph structure. 
+             If A contains B, generate:
+             subgraph A
+                B
+             end
+           - [CRITICAL] Edge Labels:
+             - Put descriptive text ON THE EDGE, not inside the node name.
+             - Format: `NodeA -->|description| NodeB`
+             - Do NOT change the node ID or Label to include the description.
+        5. Output Format:
+           - Return a JSON object with a single key "mermaid_code".
+           - The value should be the pure Mermaid code string.
+           - Example: {{ "mermaid_code": "graph TD\\n..." }}
     """
         try: 
             response = self.client.chat.completions.create(
@@ -714,29 +680,36 @@ class DrawerAgent:
             return clean_code
         except Exception as e:
             print(f"Error: {e}")
-            return None
+            return "graph TD\nError[Generation Failed]"
         
     def clean_mermaid_code(self,code):
         """
         清理Mermaid代码中的转义字符
         """
-        # 替换转义字符
+        # 1. 尝试提取代码块
+        if '```mermaid' in code:
+            pattern = r"```mermaid\s*(.*?)\s*```"
+            match = re.search(pattern, code, re.DOTALL)
+            if match:
+                code = match.group(1)
+        elif '```' in code:
+            pattern = r"```\s*(.*?)\s*```"
+            match = re.search(pattern, code, re.DOTALL)
+            if match:
+                code = match.group(1)
+
+        # 2. 替换常见转义问题
         code = code.replace('\\n', '\n')
         code = code.replace('\\"', '"')
+        
+        # 3. 去除首尾空白
+        code = code.strip()
+        
+        # 4. 去除可能残留的引号（如果整个代码被包裹在引号中）
         if code.startswith('"') and code.endswith('"'):
             code = code[1:-1]
-        # 移除多余的空白字符
-        code = code.strip()
+            code = code.strip()
 
-        if '```mermaid' in code:
-            start = code.find('```mermaid') + len('```mermaid')
-            end = code.find('```', start)
-            code = code[start:end]
-        elif '```' in code:
-            parts = code.split('```')
-            if len(parts) > 2:
-                code = parts[1]
-        
         return code
             
 def run_pipeline(user_query, num_outputs=3):
@@ -854,7 +827,14 @@ def run_pipeline(user_query, num_outputs=3):
             mermaid_code = drawer.draw_flowchart(new_arch)
             
             # Add perspective info to description
-            raw_desc = json.loads(new_arch).get("overall_description", "")
+            try:
+                arch_json = json.loads(new_arch)
+                module_details = arch_json.get("module_details", {})
+                raw_desc = arch_json.get("overall_description", "")
+            except:
+                module_details = {}
+                raw_desc = ""
+
             final_desc = additional_desc + raw_desc
                 
             results.append({
@@ -862,7 +842,8 @@ def run_pipeline(user_query, num_outputs=3):
                 "perspective": perspective,
                 # "based_on_skeleton_score": s.score,
                 "mermaid_code": mermaid_code,
-                "description": final_desc
+                "description": final_desc,
+                "node_details": module_details
             })
             print(f"\n--- Mermaid Code (Option {i+1}) ---\n{mermaid_code}\n")
         else:
@@ -873,9 +854,10 @@ def run_pipeline(user_query, num_outputs=3):
 
 if __name__ == "__main__":
     query = "design a VR system supporting gesture interaction"
-    vector_store, graph_store = load_stores()
-    planner = PlannerAgent(client, graph_store)
-    arch_plan = planner.extract_arch(query)
-    divergent_plans = planner.divergent_planning(query, arch_plan["anchors"], num_outputs=3)
-    print(divergent_plans)
+    results = run_pipeline(query)
+    # vector_store, graph_store = load_stores()
+    # planner = PlannerAgent(client, graph_store)
+    # arch_plan = planner.extract_arch(query)
+    # divergent_plans = planner.divergent_planning(query, arch_plan["anchors"], num_outputs=3)
+    # print(divergent_plans)
     
