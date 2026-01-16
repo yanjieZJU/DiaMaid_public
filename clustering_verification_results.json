@@ -1,0 +1,184 @@
+{
+  "edges": {
+    "total": 2339,
+    "min_weight": 0.41709860821441713,
+    "max_weight": 0.8998143550054966,
+    "avg_weight": 0.6314715559364662
+  },
+  "nodes_with_community": 468,
+  "communities": {
+    "total_count": 11,
+    "distribution": [
+      {
+        "id": 0,
+        "size": 83
+      },
+      {
+        "id": 1,
+        "size": 60
+      },
+      {
+        "id": 2,
+        "size": 58
+      },
+      {
+        "id": 3,
+        "size": 48
+      },
+      {
+        "id": 4,
+        "size": 47
+      },
+      {
+        "id": 5,
+        "size": 37
+      },
+      {
+        "id": 6,
+        "size": 35
+      },
+      {
+        "id": 7,
+        "size": 33
+      },
+      {
+        "id": 8,
+        "size": 25
+      },
+      {
+        "id": 9,
+        "size": 23
+      },
+      {
+        "id": 10,
+        "size": 19
+      }
+    ]
+  },
+  "summaries": [
+    {
+      "community_id": 2,
+      "summary": "The modules collectively form a comprehensive system designed for interactive decision-making and knowledge management, primarily in educational and coaching contexts. They provide functionalities such as feature extraction, decision logic, content generation, and data storage, enabling the system to process user inputs, generate tailored responses, and manage complex interactions effectively. This integration supports various applications, including task planning, user behavior prediction, and knowledge retrieval, facilitating a dynamic learning and coaching environment."
+    },
+    {
+      "community_id": 1,
+      "summary": "The modules collectively focus on enhancing user interaction and feedback within immersive environments, particularly for tasks related to learning, training, and performance assessment. They provide functionalities such as graphical user interfaces, audio and visual outputs, real-time feedback, and interactive tools for creating, modifying, and analyzing various components in a collaborative setting. This integration supports users in engaging with complex tasks through intuitive interfaces and immersive experiences."
+    },
+    {
+      "community_id": 7,
+      "summary": "The common theme of these modules is their role in data storage and processing within a framework designed for educational, health, and biological applications. Collectively, they provide functionality for storing various types of data, including raw text, datasets for training machine learning models, and user interactions, while also supporting features like content generation, feature extraction, and data augmentation to enhance learning and interaction experiences."
+    },
+    {
+      "community_id": 0,
+      "summary": "The collection of 83 modules is centered around leveraging Large Language Models (LLMs) for various content generation, assessment, and decision-making tasks across multiple domains, including education, aviation, and user interaction. Collectively, these modules provide functionalities such as generating and refining textual content, assessing the quality and factual accuracy of outputs, facilitating user interactions through natural language understanding, and managing data storage and processing for enhanced performance and usability."
+    },
+    {
+      "community_id": 4,
+      "summary": "The modules collectively focus on evaluating and enhancing the quality of AI-generated content and user interactions, particularly in the context of understanding user preferences and experiences. They provide functionalities for data collection, analysis, and interpretation, as well as mechanisms for participant recruitment and feedback categorization, ultimately aiming to improve the effectiveness and trustworthiness of AI explanations and responses."
+    },
+    {
+      "community_id": 3,
+      "summary": "The modules collectively focus on facilitating user interaction through various input methods, including natural language, speech, and handwriting, to enhance communication and learning experiences in diverse applications such as virtual environments, coaching, and educational systems. They provide functionalities for capturing user inputs, processing speech and text, and delivering responses, thereby enabling seamless interactions between users and intelligent systems. This integration supports users in achieving their goals by leveraging AI-driven recommendations and feedback mechanisms."
+    },
+    {
+      "community_id": 10,
+      "summary": "The modules collectively focus on the development, testing, and refinement of communication tools, specifically the QuickPic application, aimed at enhancing speech and language therapy for special education needs. They provide functionalities that span from initial design and prototype development to rigorous testing and validation, ultimately leading to the deployment of a user-friendly interface for speech-language pathologists and educators. Additionally, they encompass the iterative improvement of frameworks for large language model-based speech interfaces, ensuring usability and effectiveness through stakeholder engagement and user studies."
+    },
+    {
+      "community_id": 6,
+      "summary": "The common theme among these 35 modules is the facilitation and enhancement of interactive dialogue and learning experiences, primarily in educational and collaborative settings. Collectively, they provide functionalities such as content generation, emotional assessment, decision logic, user interaction, and feedback mechanisms, enabling a seamless and engaging environment for participants to share ideas, receive guidance, and develop their understanding through AI-driven interactions."
+    },
+    {
+      "community_id": 9,
+      "summary": "The 23 modules collectively focus on the processing, analysis, and execution of multimedia content, particularly in educational and sports contexts. They provide functionalities such as video uploading, trimming, execution of code in a controlled environment, and data collection from various sensors, enabling the extraction of insights and performance evaluation through multimodal data integration. This ecosystem supports instructors and trainees by facilitating video analysis, code execution, and performance tracking in a structured manner."
+    },
+    {
+      "community_id": 8,
+      "summary": "The modules collectively focus on processing and interpreting visual and motion data to enhance user interaction and experience through intelligent content generation and analysis. They provide functionalities such as feature extraction, content generation, state assessment, and signal optimization, enabling the system to understand user intent, recognize actions, and generate relevant descriptions and visual representations in real-time."
+    },
+    {
+      "community_id": 5,
+      "summary": "The 37 modules collectively focus on processing and generating semantic representations from multimodal data, particularly in the context of activity recognition and audience analysis. They provide functionalities such as feature extraction, content generation, decision logic for model training and fine-tuning, and data storage, enabling the system to effectively analyze sensor readings, generate insights from video content, and create detailed audience profiles. This integrated approach enhances the understanding and interaction with complex datasets across various applications."
+    }
+  ],
+  "sample_communities": [
+    {
+      "community_id": 0,
+      "size": 83,
+      "sample_nodes": [
+        {
+          "name": "LLM_Annotation_and_Explanation_Generation",
+          "role": "processing_core:content_generation"
+        },
+        {
+          "name": "Verifier_Assessment",
+          "role": "processing_core: state_assessment"
+        },
+        {
+          "name": "Human_Re_annotation",
+          "role": "user_entity:target_user"
+        },
+        {
+          "name": "High_Quality_Annotated_Data",
+          "role": "infrastructure: data_storage"
+        },
+        {
+          "name": "Prompt_Drafting",
+          "role": "sensing_input: direct_input"
+        }
+      ]
+    },
+    {
+      "community_id": 1,
+      "size": 60,
+      "sample_nodes": [
+        {
+          "name": "Environment",
+          "role": "interface_output: immersive_display"
+        },
+        {
+          "name": "Component_Panel",
+          "role": "interface_output: gui_display"
+        },
+        {
+          "name": "Drag_Drop_Interface",
+          "role": "sensing_input: direct_input"
+        },
+        {
+          "name": "Entity_Creation",
+          "role": "interface_output: gui_display"
+        },
+        {
+          "name": "CPD_Placement_Tool",
+          "role": "interface_output: gui_display"
+        }
+      ]
+    },
+    {
+      "community_id": 2,
+      "size": 58,
+      "sample_nodes": [
+        {
+          "name": "HTN_Knowledge_Base",
+          "role": "infrastructure: data_storage"
+        },
+        {
+          "name": "segmentGPT",
+          "role": "processing_core: feature_extraction"
+        },
+        {
+          "name": "mapGPT",
+          "role": "processing_core: decision_logic"
+        },
+        {
+          "name": "groundGPT",
+          "role": "processing_core:feature_extraction"
+        },
+        {
+          "name": "verbalizeGPT",
+          "role": "processing_core: content_generation"
+        }
+      ]
+    }
+  ]
+}

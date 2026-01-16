@@ -2,7 +2,15 @@ import os
 import re
 import httpx
 import json
+import sys
+import os
 from openai import OpenAI
+import numpy as np
+from sklearn.metrics.pairwise import cosine_similarity
+
+# Add parent directory to path for config import
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from config import *
 from retriever_neo4j import (
     load_stores, 
     retrieve_and_get_content, 
@@ -11,10 +19,10 @@ from retriever_neo4j import (
 
 http_client = httpx.Client(proxy=None, trust_env=False)
 client = OpenAI(
-    api_key="sk-y44HwiOqlzdvdMwiVGmyzpITjGQdkwWS0bJuDMWN2awpHnX7",
-    base_url="https://poloai.top/v1",
-    http_client=http_client
-)
+    http_client=http_client,
+    api_key=os.environ.get("OPENAI_API_KEY"),
+    base_url=os.environ.get("OPENAI_BASE_URL")
+    )
 
 TAXONOMY = """
 1. **user_entity**
@@ -42,7 +50,61 @@ TAXONOMY = """
 """
 
 class PlannerAgent:
+    def _precompute_cluster_embeddings(self):
+        if not self.topology_knowledge: return
+        
+        clusters = self.topology_knowledge.get("scene_clusters", {})
+        print(f"Pre-computing embeddings for {len(clusters)} clusters...")
+        for label, data in clusters.items():
+            text = data.get("name", "")
+            if text:
+                try:
+                    resp = self.client.embeddings.create(input=text, model="text-embedding-3-small")
+                    emb = resp.data[0].embedding
+                    self.cluster_embeddings[label] = emb
+                except Exception as e:
+                    print(f"Error embedding cluster {label}: {e}")
+
+    def match_scenario(self, query):
+        if not self.cluster_embeddings: return None, None
+        
+        try:
+            resp = self.client.embeddings.create(input=query, model="text-embedding-3-small")
+            query_emb = np.array(resp.data[0].embedding).reshape(1, -1)
+        except:
+            return None, None
+            
+        best_label = None
+        best_score = -1
+        
+        for label, emb in self.cluster_embeddings.items():
+            emb_arr = np.array(emb).reshape(1, -1)
+            score = cosine_similarity(query_emb, emb_arr)[0][0]
+            if score > best_score:
+                best_score = score
+                best_label = label
+                
+        return best_label, best_score
+
     def __init__(self, client, graph_store):
+        self.client = client
+        self.graph_store = graph_store
+        
+        # Load Topology Knowledge
+        self.topology_knowledge = {}
+        try:
+            # Path relative to this file: ../offline_processor/System_Topology_Knowledge.json
+            base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            topo_path = os.path.join(base_dir, "offline_processor", "System_Topology_Knowledge.json")
+            with open(topo_path, "r", encoding="utf-8") as f:
+                self.topology_knowledge = json.load(f)
+            print("✅ Loaded System Topology Knowledge.")
+        except Exception as e:
+            print(f"⚠️ System Topology Knowledge not found: {e}")
+            
+        # Cache Cluster Embeddings
+        self.cluster_embeddings = {}
+        self._precompute_cluster_embeddings()
         self.client = client
         self.graph_store = graph_store  
 
@@ -56,8 +118,11 @@ class PlannerAgent:
         Returns:
             dict: The extracted architecture.
         """
+        
+        
         prompt = f"""
             You are a system architect and requirement analyst.
+            
             ## Task
             Given a user query with a user-constructed workflow, output its normalized structure in JSON code.
             1. Identify mandatory components (anchors) and the conenction topology (including parallel connections, data flows, subgraphs, etc. if any) from user query. It might involve the functions that need to be implemented, the technical modules, fixed inputs/outputs, etc.
@@ -74,6 +139,7 @@ class PlannerAgent:
                     {{
                         "user_term": "the user term for this anchor, e.g., AI tutor",
                         "role": "the role of this anchor, choose from [user_entity, sensing_input, processing_core, interface_output, infrastructure]",
+                        "community_id": "the ID of the matched functional cluster (from Available System Capabilities), or null if no clear match",
                         "description": "the description of this anchor, e.g., answer questions about the user's topic."
                     }}
                 ],
@@ -122,6 +188,67 @@ class PlannerAgent:
         # Format base anchors for the prompt
         base_anchors_str = json.dumps([a['user_term'] for a in base_anchors], ensure_ascii=False)
         
+        # 1. Match Scenario & Get Context
+        cluster_id, score = self.match_scenario(user_query)
+        relevant_communities = []
+        
+        if cluster_id:
+            cluster_data = self.topology_knowledge["scene_clusters"][cluster_id]
+            print(f"Matched Scenario Cluster: {cluster_data['name'][:200]}... (Score: {score:.2f})")
+            
+            # A. Get Relevant Communities
+            comm_dist = cluster_data.get("community_distribution", {})
+            # Get top 8 communities
+            top_comms = sorted(comm_dist.items(), key=lambda x: x[1], reverse=True)[:8]
+            relevant_communities = [c[0] for c in top_comms]
+            
+            # pattern_cypher = """
+            # MATCH (n:LlamaNode)-[r:FLOWS_TO]->(m:LlamaNode)
+            # WHERE (n.community_L0 IN $comm_ids OR m.community_L0 IN $comm_ids)
+            # AND n.name IS NOT NULL AND m.name IS NOT NULL
+            # AND id(n) <> id(m)
+            # RETURN distinct n.role as src_role, n.name as src_name, m.role as tgt_role, m.name as tgt_name
+            # LIMIT 15
+            # """
+            # concrete_patterns = []
+            # with self.graph_store._driver.session() as session:
+            #     params = {"comm_ids": relevant_communities if relevant_communities else []}
+            #     result = session.run(pattern_cypher, **params)
+            #     for record in result:
+            #         src_str = f"[{record['src_role']}] {record['src_name']}"
+            #         tgt_str = f"[{record['tgt_role']}] {record['tgt_name']}"
+            #         concrete_patterns.append(f"{src_str} -> {tgt_str}")
+
+            # if not concrete_patterns and "transitions" in cluster_data:
+            #     transitions = cluster_data.get("transitions", {})
+            #     for role, data in transitions.items():
+            #         top_next = sorted(data.get("next_likely_steps", []), key=lambda x: x["prob"], reverse=True)[:2]
+            #         if top_next:
+            #             next_roles = ", ".join([f"{n['role']} ({n['prob']})" for n in top_next])
+            #             concrete_patterns.append(f"- {role} -> [{next_roles}] (Abstract Pattern)")
+            
+            # feasible_patterns_text = "\n".join(concrete_patterns[:10]) # Limit to 10
+        
+        # 2. Fetch Capabilities (Targeted or Global)
+        print(f"Fetching capabilities for {len(relevant_communities) if relevant_communities else 'ALL'} communities...")
+        
+        cypher = """
+        MATCH (n:LlamaNode) 
+        WHERE n.community_L0 IS NOT NULL
+        AND ($comm_ids IS NULL OR n.community_L0 IN $comm_ids)
+        RETURN DISTINCT n.community_L0 as id, n.summary_L0 as summary
+        LIMIT 50
+        """
+        summaries = []
+        with self.graph_store._driver.session() as session:
+            # If relevant_communities is empty, pass None to get global (limited)
+            params = {"comm_ids": relevant_communities if relevant_communities else None}
+            result = session.run(cypher, **params)
+            for record in result:
+                summaries.append(f"[Community ID: {record['id']}]: {record['summary']}")
+        
+        available_capabilities = "\n".join(summaries)
+
         prompt = f"""
         You are a creative System Architect.
         
@@ -139,15 +266,21 @@ class PlannerAgent:
            - Your expansion should be based on user needs, and should supplement and improve the current process form different perspectives, so as to make it have more specific processing methods and richer ditails and functions.
         
         2. **Incremental Only**: 
-           - Do NOT repeat the Base Anchors if there's no need to modify or improve them. 
+           - Do NOT repeat the Base Anchors unless there's a special need to modify or improve them. 
            - Output ONLY the ADDITIONAL components (modules) needed for the extension.
            
         3. **Specific Anchors**:
            - Each additional component belongs to a ```function module``` and can be connected to the existing components. Before you output the final plan, please recheck if the data flow is correct and reasonable, and meet user needs.
-           - For each additional component, provide a specific 'user_term', a functional 'description', and a precise 'role'.
+           - For each additional component, provide a specific 'user_term', a functional 'description', a precise 'role', and a 'community_id' if applicable.
 
         ### Role Taxonomy
         {TAXONOMY}\n\n
+
+        ## Available System Capabilities (from Knowledge Base)
+            The following are the existing functional clusters in our component library. 
+            Try to map the user's requirements to these capabilities where possible to ensure availability.
+            {available_capabilities}
+
 
         ## Output Structure (JSON)
         {{
@@ -159,7 +292,8 @@ class PlannerAgent:
                         {{
                             "user_term": "Specific Module Name",
                             "description": "Functional description of what it does",
-                            "role": "category: subcategory"
+                            "role": "category: subcategory",
+                            "community_id": "ID from Available Capabilities or null"
                         }}
                     ]
                 }},
@@ -167,7 +301,7 @@ class PlannerAgent:
             ]
         }}
         """
-
+        print(prompt)
         print(f"\n🧠 Generating {num_outputs} divergent plans...")
         try:
             response = self.client.chat.completions.create(
@@ -200,12 +334,14 @@ class RetrieverAgent:
         self.graph_store = graph_store
         self.client = client
 
-    def retrieve_for_module(self, anchors_list, top_k=3):
+    def retrieve_for_module(self, anchors_list, top_k=3, include_topology=True):
         anchor_mapping = {}
         for anchor in anchors_list:
             user_term = anchor["user_term"]
             description = anchor["description"]
             role = anchor.get("role", None) # Get role
+            community_id = anchor.get("community_id", None) # Get structured community ID
+
             query_text = f"{user_term}: {description}"
         
             retrieved_nodes = retrieve_and_get_content(
@@ -214,7 +350,9 @@ class RetrieverAgent:
                 self.graph_store, 
                 top_k,
                 node_type="MODULE",
-                role_filter=role # Pass role filter
+                role_filter=role, # Pass role filter
+                community_id=community_id, # Pass community filter
+                include_topology=include_topology
             )
 
             if retrieved_nodes:
@@ -348,13 +486,64 @@ class IntegratorAgent:
         hints_text += "\n"
         return hints_text
     
-    def integrate_arch(self, query, skeletons, retrieved_info, structural_hints=[]):
+    def integrate_arch(self, query, skeletons, retrieved_info, structural_hints=[], added_nodes=[]):
+        """
+        Integrates all information to generate the final system architecture.
+
+        Args:
+            query (str): The user query.
+            skeletons (list): Reference system skeletons.
+            retrieved_info (dict): Retrieved specific module information.
+            structural_hints (list): Structural paths found between components.
+            added_nodes (list): New nodes introduced by the divergent planner.
+
+        Returns:
+            str: The final integrated architecture description.
+        """
         skeletons_text = ""
         if skeletons:
             for i, s in enumerate(skeletons):
                 skeletons_text += f"--- Skeleton {i} ---\n {s.node.text}\n\n"
 
         hints_text = self.format_hints(structural_hints)
+
+        added_nodes_text = ""
+        if added_nodes:
+            added_nodes_text = "\n\n".join([f"{node['user_term']} ({node['description']})" for node in added_nodes])
+
+        # Slim down retrieved_info to reduce noise and token usage
+        # Identify added anchor keys for special handling
+        added_keys = set()
+        if added_nodes:
+            added_keys = {n['user_term'] for n in added_nodes}
+
+        slim_retrieved_info = {}
+        for anchor, nodes in retrieved_info.items():
+            slim_nodes = []
+            for n in nodes:
+                node_data = {
+                    "module": n.get('metadata', {}).get('name', 'Unknown'),
+                    "content": n.get('text', '')
+                }
+                
+                # If this is an added node, we explicitly preserve its topology 
+                # to help the LLM understand how to connect this new component
+                if anchor in added_keys:
+                    # Try to get raw topology from metadata as a cleaner signal
+                    raw_topo = n.get('structural_path', None) # We stored it here in run_pipeline
+                    if not raw_topo: 
+                        raw_topo = n.get('metadata', {}).get('topology', None)
+                        
+                    if raw_topo:
+                        # Simplify topology data to avoid huge dumps
+                        simplified_topo = {
+                            "upstream": [u['name'] for u in raw_topo.get('upstream', [])],
+                            "downstream": [d['name'] for d in raw_topo.get('downstream', [])]
+                        }
+                        node_data["structural_context"] = simplified_topo
+                
+                slim_nodes.append(node_data)
+            slim_retrieved_info[anchor] = slim_nodes
 
         prompt = f"""
         You are a professional designer and researcher in the field of HCI. Design a complete pipeline based on the user's requirements and the retrieved information.
@@ -378,7 +567,8 @@ class IntegratorAgent:
         For the entire system architecture, here is the most similar system found in the literature.
 
         ## Data Sources
-        Retrieved Modules: ```{json.dumps(retrieved_info, ensure_ascii=False, indent=2)}```\n\n
+        Added Nodes by Divergent Planner: ```{added_nodes_text}```\n\n
+        Retrieved Modules: ```{json.dumps(slim_retrieved_info, ensure_ascii=False, indent=2)}```\n\n
         Structural Paths: ```{hints_text}```\n\n
         Reference Skeletons: ```{skeletons_text}```\n\n
         
@@ -388,6 +578,7 @@ class IntegratorAgent:
         1. **Connect the Flow**: Use the topology info to decide logical connections. If Module A usually follows Module B in Paper X, try to preserve that flow if it fits.
         2. **Cite Sources**: Reference the original papers where the nodes are from.
         3. **Redundancy Check**: REMOVE redundant nodes and connections. 
+        4. **Incorporate Divergent Ideas**: Ensure the added nodes from the divergent planner are integrated meaningfully.
         
         Final Output Structure (in JSON format)
         {{
@@ -429,7 +620,7 @@ class IntegratorAgent:
             response = self.client.chat.completions.create(
                 model="gpt-4o",
                 messages=[{"role": "user", "content": prompt}],
-                temperature=0.8,
+                temperature=0.9,
                 response_format={"type": "json_object"},
             ).choices[0].message.content
         except Exception as e:
@@ -502,7 +693,6 @@ class DrawerAgent:
         1. The **subgraph** has been correctly defined and an end marker "end" has been added.
         2. The name of each node (enclosed in parentheses or squares brackets) do not contain any other parentheses or brackets, or are correctly enclosed within double quotes.
         3. NO style attributes, NO "click" events, NO "class" identification.
-
         
         Final Output Structure (in JSON format)
         {{
@@ -581,7 +771,8 @@ def run_pipeline(user_query, num_outputs=3):
 
     # === Step 1: Global Retrieval for Base Anchors (Higher Recall) ===
     print(f"\n🎯 Retrieving Base Anchors (Top-6 for richer context)...")
-    base_nodes_map = retriever.retrieve_for_module(arch_plan["anchors"], top_k=6)
+    # Base anchors are standard components, we don't need their confusing local topology
+    base_nodes_map = retriever.retrieve_for_module(arch_plan["anchors"], top_k=6, include_topology=False)
     
     # Process base nodes into standard format
     base_ref_info = {}
@@ -625,8 +816,11 @@ def run_pipeline(user_query, num_outputs=3):
         print(f"Rationale: {rationale}")
         
         if additional_anchors:
-            additional_map = retriever.retrieve_for_module(additional_anchors, top_k=3)
+            # Divergent anchors are new ideas, their topology is valuable context
+            additional_map = retriever.retrieve_for_module(additional_anchors, top_k=3, include_topology=True)
             for anchor_name, retrieved_list in additional_map.items():
+                # Note: We append, so if multiple plans use same anchor name, it overwrites. 
+                # Ideally divergent anchors have unique user_terms.
                 current_ref_info[anchor_name] = []
                 for node_with_score in retrieved_list:
                     node = node_with_score.node
@@ -652,7 +846,8 @@ def run_pipeline(user_query, num_outputs=3):
             # skeletons=[s],
             skeletons=None, 
             retrieved_info=current_ref_info, 
-            structural_hints=structural_hints
+            structural_hints=structural_hints,
+            added_nodes=additional_anchors
         )
         
         if new_arch:
@@ -677,7 +872,10 @@ def run_pipeline(user_query, num_outputs=3):
 
 
 if __name__ == "__main__":
-    query = "design a physical education system based on LLM. Nodes: graph TD;\n Trainee[Trainee]-->|user data| Sensor[Sensor]\n;"
-    results = run_pipeline(query, num_outputs=3)
-    for res in results:
-        print(f"\nFinal Result {res['option_id']}:\n{res['mermaid_code']}")
+    query = "design a VR system supporting gesture interaction"
+    vector_store, graph_store = load_stores()
+    planner = PlannerAgent(client, graph_store)
+    arch_plan = planner.extract_arch(query)
+    divergent_plans = planner.divergent_planning(query, arch_plan["anchors"], num_outputs=3)
+    print(divergent_plans)
+    

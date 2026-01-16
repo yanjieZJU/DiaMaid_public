@@ -4,7 +4,7 @@ import httpx
 from openai import OpenAI
 
 # --- Configuration ---
-DATA_DIR = "./case_llm_education/json_files"
+DATA_DIR = "./case_llm_artifact/json_files"
 API_KEY = "sk-y44HwiOqlzdvdMwiVGmyzpITjGQdkwWS0bJuDMWN2awpHnX7"
 BASE_URL = "https://poloai.top/v1"
 

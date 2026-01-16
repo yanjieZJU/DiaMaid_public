@@ -12,16 +12,12 @@ from llama_index.embeddings.openai import OpenAIEmbedding
 from llama_index.graph_stores.neo4j import Neo4jPropertyGraphStore
 from llama_index.core.vector_stores import SimpleVectorStore
 
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from config import *
+
 # --- 配置 ---
 DATA_DIR = "./case_llm_artifact/json_files"
 STORAGE_DIR = "./server/graph_storage" 
-
-os.environ["OPENAI_API_KEY"] = "sk-y44HwiOqlzdvdMwiVGmyzpITjGQdkwWS0bJuDMWN2awpHnX7" 
-os.environ["OPENAI_API_BASE"] = "https://poloai.top/v1"
-
-NEO4J_USERNAME = "neo4j"
-NEO4J_PASSWORD = "BQLjYc4gOpIxTi6o5c-es481vKejEHHBGuxJeEvX9hg"
-NEO4J_URL = "neo4j+s://8891a7fc.databases.neo4j.io"
 
 VALID_ROLES_MAP = {
     "user_entity": ["target_user", "stakeholder"],
@@ -151,7 +147,7 @@ def parse_json_to_graph_elements(json_path):
     article_id = f"ART_{uuid.uuid4().hex[:8]}"
     
     article_text = (
-        f"Article: {file_name}\n"
+        # f"Article: {file_name}\n"
         f"Function: {article_info.get('function','')}\n"
         f"Application Scenarios: {article_info.get('application_scenarios', '')}\n"
         f"Diagram Caption: {article_info.get('caption', '')}"
