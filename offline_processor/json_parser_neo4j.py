@@ -209,6 +209,7 @@ def parse_json_to_graph_elements(json_path):
             "name": mod_id,
             "type": "MODULE",
             "role": module_data.get('role', ''),
+            "function": module_data.get('function_description', ''),
             "code": mermaid_code,
             "source": file_name,
             "subnodes": module_data.get('subnodes', [])

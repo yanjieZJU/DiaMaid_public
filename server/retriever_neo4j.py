@@ -22,15 +22,6 @@ llm = OpenAI(model="gpt-4o", http_client=http_client)
 
 STORAGE_DIR = "./server/graph_storage"
 
-# Role Collaboration Graph: defines typical data flow patterns between role categories
-# Used for far-hop retrieval to suggest complementary modules
-ROLE_COLLABORATION = {
-    "user_entity": ["sensing_input", "interface_output"],  # users interact with sensors and outputs
-    "sensing_input": ["processing_core"],  # sensors feed data to processors
-    "processing_core": ["interface_output", "infrastructure", "processing_core"],  # processors output results or feed other processors
-    "interface_output": ["user_entity"],  # outputs reach users
-    "infrastructure": ["processing_core", "sensing_input", "interface_output"]  # infrastructure supports all
-}
 
 def load_stores():
     print("Connecting to Stores...")
@@ -295,7 +286,7 @@ def find_structural_path(source_text, target_text, vector_store, graph_store, re
         MATCH p = shortestPath((s)-[*1..5]-(t))
         WHERE any(r in relationships(p) WHERE type(r) = 'FLOWS_TO')
         RETURN
-            [n in nodes(p) | {id: n.id, name: n.name, text: n.text}] as path_nodes,
+            [n in nodes(p) | {id: n.id, name: n.name, text: n.text, function: n.function}] as path_nodes,
             [r in relationships(p) | type(r)] as relations,
             [r in relationships(p) | properties(r)] as rel_props,
             length(p) as len

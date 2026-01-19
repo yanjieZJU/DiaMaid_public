@@ -15,7 +15,7 @@ TAXONOMY = """
     - stakeholder: observer or assistant, e.g., instructor, researcher
 2. **sensing_input**
     - bio_sensor: internal human physiological signals, e.g., EEG, EMG, ECG
-    - behavior_sensor: exernal human behaviors/movements. e.g., IMU, eye tracker, motion capture
+    - behavior_sensor: external human behaviors/movements. e.g., IMU, eye tracker, motion capture
     - env_sensor: environment perception, e.g., RGB Camera, temperature sensor
     - direct_input: direct human-computer interaction input based on interfaces, e.g., Keyboard, Mouse, Touchscreen
 3. **processing_core**

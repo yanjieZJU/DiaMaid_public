@@ -14,7 +14,7 @@ If there is a figure in the article that represents the core system architecture
 Else: return: {"arch_exist": False}; exit the processing
 
 ## Step 2: Figure content comprehension and reconstruct.
-### 1. Identify main workflows
+### A. Identify main workflows
 1. **Main Workflow** refers to the complete chain link that directly involves the most core inputs of the system (such as user data, interaction, core business triggers) to the final outpus (such as the information obtained by the user, feedback, physical/virtual actions, etc.)
    - First, identify all the **Primary Inputs**, usually the inputs from end users, direct users, or the fundamental triggering data of the system's excecution.
    - Then, identify all the **Final Outputs**, which are the information ultimately returned to the user or produced.
@@ -23,7 +23,7 @@ Else: return: {"arch_exist": False}; exit the processing
 2. For each **independent main input(s)-output pair**, clearly define one or more end-to-end paths/processes in the diagram, and sort out the respective nodes (function modules) and edges (data flow). The path should be represented as a sequence of nodes and edges.
 3. If there are multiple main workflows (such as multiple users, tasks, independent channels), they should be separately sorted out.
 4. Labeling rule: **use unique and meaningful identifiers (according to specific functions) instead of numbers. DO NOT use "main_workflow" as the identifier**.
-### 2. Identify supporting workflows
+### B. Identify supporting workflows
 1. **Supporting Workflow** refers to links that do not directly participate in th end-to-end user input-output process, but provide support fot the main workflow, such as training links, data preparation, knowledge management, background management, etc.
 2. **Specific methods**: 
    - The remaining functional modules that are not on any main process path are considered.
@@ -52,7 +52,7 @@ Return the role in the format: "Category: Role" (e.g., "processing_core: feature
     - stakeholder: observer or assistant, e.g., instructor, researcher
 2. **sensing_input**
     - bio_sensor: internal human physiological signals, e.g., EEG, EMG, ECG
-    - behavior_sensor: exernal human behaviors/movements. e.g., IMU, eye tracker, motion capture
+    - behavior_sensor: external human behaviors/movements. e.g., IMU, eye tracker, motion capture
     - env_sensor: environment perception, e.g., RGB Camera, temperature sensor
     - direct_input: direct human-computer interaction input based on interfaces, e.g., Keyboard, Mouse, Touchscreen
 3. **processing_core**

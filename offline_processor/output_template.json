@@ -29,9 +29,9 @@
     "modules": [
         {
             "mod_id": "the identifier of the module (use id in mermaid code)",
-            "role": "the role of the module",
-            "function_description": "the function of the module, including the input and output description",
-            "technical_details": "the description of the module's key technical and implementation details. ",
+            "role": "the role of the module, STRICTLY select from the Role Taxonomy. DO NOT INVENT NEW ROLES.",
+            "function_description": "a detailed description of the module's function, including the input and output description",
+            "technical_details": "a detailed description of the module's key technical and implementation details.",
             "io_spec": {
                 "in": "the input of the module",
                 "out": "the output of the module"

@@ -139,7 +139,6 @@ class PlannerAgent:
                     {{
                         "user_term": "the user term for this anchor, e.g., AI tutor",
                         "role": "the role of this anchor, choose from [user_entity, sensing_input, processing_core, interface_output, infrastructure]",
-                        "community_id": "the ID of the matched functional cluster (from Available System Capabilities), or null if no clear match",
                         "description": "the description of this anchor, e.g., answer questions about the user's topic."
                     }}
                 ],
@@ -175,79 +174,120 @@ class PlannerAgent:
     def divergent_planning(self, user_query, base_anchors, num_outputs=2):
         """
         Generates divergent extension plans based on the user query and already extracted base anchors.
-        
-        Args:
-            user_query (str): The original user query.
-            base_anchors (list): List of anchors already extracted by extract_arch.
-            num_outputs (int): The number of distinct divergent plans to generate.
-
-        Returns:
-            list: A list of dicts, each containing 'perspective' and 'additional_anchors'.
+        Uses Knowledge-Distance Perspective Injection to find both near-field and far-field inspirations.
         """
         
         # Format base anchors for the prompt
         base_anchors_str = json.dumps([a['user_term'] for a in base_anchors], ensure_ascii=False)
         
-        # 1. Match Scenario & Get Context
-        cluster_id, score = self.match_scenario(user_query)
-        relevant_communities = []
-        
-        if cluster_id:
-            cluster_data = self.topology_knowledge["scene_clusters"][cluster_id]
-            print(f"Matched Scenario Cluster: {cluster_data['name'][:200]}... (Score: {score:.2f})")
-            
-            # A. Get Relevant Communities
-            comm_dist = cluster_data.get("community_distribution", {})
-            # Get top 8 communities
-            top_comms = sorted(comm_dist.items(), key=lambda x: x[1], reverse=True)[:8]
-            relevant_communities = [c[0] for c in top_comms]
-            
-            # pattern_cypher = """
-            # MATCH (n:LlamaNode)-[r:FLOWS_TO]->(m:LlamaNode)
-            # WHERE (n.community_L0 IN $comm_ids OR m.community_L0 IN $comm_ids)
-            # AND n.name IS NOT NULL AND m.name IS NOT NULL
-            # AND id(n) <> id(m)
-            # RETURN distinct n.role as src_role, n.name as src_name, m.role as tgt_role, m.name as tgt_name
-            # LIMIT 15
-            # """
-            # concrete_patterns = []
-            # with self.graph_store._driver.session() as session:
-            #     params = {"comm_ids": relevant_communities if relevant_communities else []}
-            #     result = session.run(pattern_cypher, **params)
-            #     for record in result:
-            #         src_str = f"[{record['src_role']}] {record['src_name']}"
-            #         tgt_str = f"[{record['tgt_role']}] {record['tgt_name']}"
-            #         concrete_patterns.append(f"{src_str} -> {tgt_str}")
+        # 1. Calculate similarities with ALL clusters
+        if not self.cluster_embeddings: 
+            print("No cluster embeddings available for divergent planning.")
+            return []
 
-            # if not concrete_patterns and "transitions" in cluster_data:
-            #     transitions = cluster_data.get("transitions", {})
-            #     for role, data in transitions.items():
-            #         top_next = sorted(data.get("next_likely_steps", []), key=lambda x: x["prob"], reverse=True)[:2]
-            #         if top_next:
-            #             next_roles = ", ".join([f"{n['role']} ({n['prob']})" for n in top_next])
-            #             concrete_patterns.append(f"- {role} -> [{next_roles}] (Abstract Pattern)")
+        try:
+            resp = self.client.embeddings.create(input=user_query, model="text-embedding-3-small")
+            query_emb = np.array(resp.data[0].embedding).reshape(1, -1)
+        except Exception as e:
+            print(f"Error embedding query: {e}")
+            return []
+
+        scored_clusters = []
+        for label, emb in self.cluster_embeddings.items():
+            emb_arr = np.array(emb).reshape(1, -1)
+            score = cosine_similarity(query_emb, emb_arr)[0][0]
+            scored_clusters.append((label, score))
             
-            # feasible_patterns_text = "\n".join(concrete_patterns[:10]) # Limit to 10
+        # Sort by score descending
+        scored_clusters.sort(key=lambda x: x[1], reverse=True)
         
-        # 2. Fetch Capabilities (Targeted or Global)
-        print(f"Fetching capabilities for {len(relevant_communities) if relevant_communities else 'ALL'} communities...")
+        # 2. Select Reference Clusters (Near vs Far)
+        # Strategy:
+        # - Plan 0 (if num_outputs > 0) -> Near Field (Top 1) -> "Deep Dive"
+        # - Plan 1..N -> Far Field (Random from score 0.3 - 0.6) -> "Cross-domain Transfer"
         
-        cypher = """
-        MATCH (n:LlamaNode) 
-        WHERE n.community_L0 IS NOT NULL
-        AND ($comm_ids IS NULL OR n.community_L0 IN $comm_ids)
-        RETURN DISTINCT n.community_L0 as id, n.summary_L0 as summary
-        LIMIT 50
-        """
-        summaries = []
-        with self.graph_store._driver.session() as session:
-            # If relevant_communities is empty, pass None to get global (limited)
-            params = {"comm_ids": relevant_communities if relevant_communities else None}
-            result = session.run(cypher, **params)
-            for record in result:
-                summaries.append(f"[Community ID: {record['id']}]: {record['summary']}")
+        selected_references = []
         
-        available_capabilities = "\n".join(summaries)
+        # A. Near Field (Top 1)
+        if scored_clusters:
+            near_cluster_id = scored_clusters[0][0]
+            near_score = scored_clusters[0][1]
+            selected_references.append({
+                "type": "NEAR_FIELD",
+                "cluster_id": near_cluster_id,
+                "score": near_score,
+                "name": self.topology_knowledge["scene_clusters"][near_cluster_id]["name"]
+            })
+            print(f"🎯 Near-Field Context: {self.topology_knowledge['scene_clusters'][near_cluster_id]['name'][:50]}... (Score: {near_score:.2f})")
+
+        # B. Far Field (Random Sampling)
+        # Filter for mid-range scores (e.g., 0.35 to 0.65) to ensure relevance but difference
+        far_candidates = [c for c in scored_clusters if 0.3 <= c[1] <= 0.6]
+        
+        needed_far = max(0, num_outputs - 1)
+        if far_candidates and needed_far > 0:
+            import random
+            # Sample without replacement if possible
+            k = min(len(far_candidates), needed_far)
+            chosen_far = random.sample(far_candidates, k)
+            
+            for c_id, c_score in chosen_far:
+                selected_references.append({
+                    "type": "FAR_FIELD",
+                    "cluster_id": c_id,
+                    "score": c_score,
+                    "name": self.topology_knowledge["scene_clusters"][c_id]["name"]
+                })
+                print(f"🚀 Far-Field Context: {self.topology_knowledge['scene_clusters'][c_id]['name'][:50]}... (Score: {c_score:.2f})")
+        
+        # Fill remaining with random near/mid if we ran out of far candidates
+        while len(selected_references) < num_outputs:
+             # Just pick next best near ones or randoms
+             # for simplicity, just pick from top list excluding already picked
+             existing_ids = set(r["cluster_id"] for r in selected_references)
+             residue = [c for c in scored_clusters if c[0] not in existing_ids]
+             if not residue: break
+             c_id, c_score = residue[0]
+             selected_references.append({
+                "type": "SUPPLEMENTAL",
+                "cluster_id": c_id,
+                "score": c_score,
+                "name": self.topology_knowledge["scene_clusters"][c_id]["name"]
+             })
+        
+        # 3. Retrieve Capabilities for specific references
+        # We want to give the LLM specific "Reference Packs"
+        
+        reference_context_str = ""
+        
+        for idx, ref in enumerate(selected_references):
+            c_id = ref["cluster_id"]
+            cluster_data = self.topology_knowledge["scene_clusters"][c_id]
+            
+            # Get top N communities for this cluster
+            comm_dist = cluster_data.get("community_distribution", {})
+            top_comms_ids = sorted(comm_dist.items(), key=lambda x: x[1], reverse=True)[:5] # Top 5 communities
+            relevant_comm_ids = [c[0] for c in top_comms_ids]
+            
+            # Fetch summaries for these communities
+            comm_summaries_text = []
+            if relevant_comm_ids:
+                with self.graph_store._driver.session() as session:
+                    cypher = """
+                    MATCH (n:LlamaNode) 
+                    WHERE n.community_L0 IN $comm_ids
+                    RETURN DISTINCT n.community_L0 as id, n.summary_L0 as summary
+                    """
+                    result = session.run(cypher, comm_ids=relevant_comm_ids)
+                    for record in result:
+                        comm_summaries_text.append(f"- [Community {record['id']}]: {record['summary']}")
+            
+            ref_block = f"""
+            ### Source {idx + 1} ({ref['type']} - Dist: {1-ref['score']:.2f}): {cluster_data['name']}
+            **Key Functional Communities in this domain:**
+            {chr(10).join(comm_summaries_text)}
+            """
+            reference_context_str += ref_block
 
         prompt = f"""
         You are a creative System Architect.
@@ -259,45 +299,53 @@ class PlannerAgent:
         ## Task
         Generate **{num_outputs}** DISTINCT and DIVERGENT extension plans to enhance this system. 
         
-        ## Requirements
-        1. **Distinct Perspectives**: 
-           - Each plan should explore a DIFFERENT technical perspective or feature set that complements the base components.
-           - Based on the new perspectives, you can either supplement the existing anchors with additional details or introduce new modules.
-           - Your expansion should be based on user needs, and should supplement and improve the current process form different perspectives, so as to make it have more specific processing methods and richer ditails and functions.
+        ## Reference Material (Knowledge Injection)
+        We have retrieved knowledge from different domain clusters to inspire you.
+        Please strictly follow the mapping below to generate your plans:
         
-        2. **Incremental Only**: 
-           - Do NOT repeat the Base Anchors unless there's a special need to modify or improve them. 
-           - Output ONLY the ADDITIONAL components (modules) needed for the extension.
-           
-        3. **Specific Anchors**:
-           - Each additional component belongs to a ```function module``` and can be connected to the existing components. Before you output the final plan, please recheck if the data flow is correct and reasonable, and meet user needs.
-           - For each additional component, provide a specific 'user_term', a functional 'description', a precise 'role', and a 'community_id' if applicable.
+        {reference_context_str}
+        
+        ## Requirements by Plan
+        
+        **Plan 1 (Deep Optimization)**:
+        - Use **Source 1** (Near-Field) as your inspiration.
+        - Look for professional details or standard modules in this domain that are missing from the Base Anchors.
+        - Refine the system to be more professional and complete.
+        
+        **Plan 2 (Cross-Domain Inspiration)** (If requested):
+        - Use **Source 2** (Far-Field) as your inspiration.
+        - Perform **Concept Blending**: specific methods from Source 2 (e.g., "Medical Monitoring") should be metaphorically transferred to the User's domain (e.g., "Education Monitoring").
+        - Ask yourself: "How would an expert in Source 2 solve the problems in the User's query?"
+        
+        **Plan 3+** (If requested):
+        - Use **Source 3+** similarly for distinct cross-domain features.
+
+        ## General Constraint
+        1. **Incremental Only**: 
+           - Do NOT repeat the Base Anchors. Output ONLY the ADDITIONAL components (modules).
+        2. **Specific Anchors**:
+           - Each additional component must have a 'user_term', a 'description', a 'role', and a 'community_id' (from the reference source).
+           - Recheck data flow logic.
 
         ### Role Taxonomy
         {TAXONOMY}\n\n
-
-        ## Available System Capabilities (from Knowledge Base)
-            The following are the existing functional clusters in our component library. 
-            Try to map the user's requirements to these capabilities where possible to ensure availability.
-            {available_capabilities}
-
 
         ## Output Structure (JSON)
         {{
             "plans": [
                 {{
-                    "perspective": "Short title of the perspective (e.g., AI-Enhanced)",
-                    "rationale": "Why this extension adds value",
+                    "perspective": "use short sentence or phrases to describe the perspective (e.g., 'Biometric-Adaptive Interaction')",
+                    "rationale": "Explain explicitly: 'Inspired by [Source Name], we introduced [Feature] to achieve [Goal]...'",
                     "additional_anchors": [
                         {{
                             "user_term": "Specific Module Name",
-                            "description": "Functional description of what it does",
+                            "description": "Functional description",
                             "role": "category: subcategory",
-                            "community_id": "ID from Available Capabilities or null"
+                            "community_id": "ID from Source text"
                         }}
                     ]
                 }},
-                ... (total {num_outputs} plans)
+                ...
             ]
         }}
         """
@@ -371,10 +419,6 @@ class RetrieverAgent:
             top_k=10,
             node_type="WORKFLOW",
         )
-        valid_nodes = []
-        # for node_with_score in retrieved_nodes:
-        #     if node_with_score.score >= threshold:
-        #         valid_nodes.append(node_with_score.node)
         return retrieved_nodes
     
     def retrieve_structure_paths(self, user_relations):
@@ -452,9 +496,16 @@ class IntegratorAgent:
             rel_props = path.get('rel_props', [])
             
             # Build chain description
-            chain_desc.append(f"[{nodes[0]['name']}]")
+            # Append functional description to provide context
+            start_node_name = nodes[0]['name']
+            chain_desc.append(f"[{start_node_name}]")
+            
             for j, rel in enumerate(rels):
                 target_node = nodes[j+1]['name']
+                if nodes[j+1].get('function'):
+                    target_node += f" ({nodes[j+1]['function']}...)"
+                elif nodes[j+1].get('text'):
+                    target_node += f" ({nodes[j+1]['text'][:300]}...)"
                 
                 # Extract edge label if available
                 data_content = ""
@@ -464,7 +515,7 @@ class IntegratorAgent:
                         data_content = f": {lbl}"
 
                 if rel == "FLOWS_TO":
-                    chain_desc.append(f" --(flows to{data_content})--> [{target_node}]")
+                    chain_desc.append(f" --(label: {data_content})--> [{target_node}]")
                 elif rel == "HAS_ROLE":
                         chain_desc.append(f" ==(equivalent role)==> [{target_node}]")
                 else:
@@ -472,38 +523,28 @@ class IntegratorAgent:
 
             hints_text += f"   * Connection '{path['source_query']} -> {path['target_query']}':\n"
             hints_text += f"     Reference Path: {''.join(chain_desc)}\n"
-            
-            # Smartly extract intermediate suggestions
-            # Only suggest nodes that are part of a data flow (outgoing relation is FLOWS_TO)
-            # This filters out nodes that are just role-equivalence jumps
+
             real_intermediates = []
             for k in range(1, len(nodes)-1):
                 if k < len(rels) and rels[k] == "FLOWS_TO":
                         real_intermediates.append(nodes[k]['name'])
 
-            if real_intermediates:
-                hints_text += f"Suggestion: You might need intermediate modules like: {', '.join(real_intermediates)}\n"
         hints_text += "\n"
         return hints_text
     
-    def integrate_arch(self, query, skeletons, retrieved_info, structural_hints=[], added_nodes=[]):
+    def integrate_arch(self, query, retrieved_info, structural_hints=[], added_nodes=[]):
         """
         Integrates all information to generate the final system architecture.
 
         Args:
             query (str): The user query.
-            skeletons (list): Reference system skeletons.
             retrieved_info (dict): Retrieved specific module information.
             structural_hints (list): Structural paths found between components.
             added_nodes (list): New nodes introduced by the divergent planner.
 
         Returns:
-            str: The final integrated architecture description.
+            dict: The final integrated architecture plan.
         """
-        skeletons_text = ""
-        if skeletons:
-            for i, s in enumerate(skeletons):
-                skeletons_text += f"--- Skeleton {i} ---\n {s.node.text}\n\n"
 
         hints_text = self.format_hints(structural_hints)
 
@@ -526,11 +567,10 @@ class IntegratorAgent:
                     "content": n.get('text', '')
                 }
                 
-                # If this is an added node, we explicitly preserve its topology 
-                # to help the LLM understand how to connect this new component
+                # If this is an added node, explicitly preserve its topology 
                 if anchor in added_keys:
                     # Try to get raw topology from metadata as a cleaner signal
-                    raw_topo = n.get('structural_path', None) # We stored it here in run_pipeline
+                    raw_topo = n.get('structural_path', None)
                     if not raw_topo: 
                         raw_topo = n.get('metadata', {}).get('topology', None)
                         
@@ -546,41 +586,43 @@ class IntegratorAgent:
             slim_retrieved_info[anchor] = slim_nodes
 
         prompt = f"""
-        You are a professional designer and researcher in the field of HCI. Design a complete pipeline based on the user's requirements and the retrieved information.
+        You are a professional designer and architect in the field of HCI. Design a complete pipeline based on the user's requirements and the retrieved information.
         ## User Requirements
         The user requirements are the principle you should follow the most. The nodes in the query must be included in the pipeline.
         User Query: ```{query}```
         \n\n
         ## Retrieved Information
-        You have three sources of information. Use them according to the following rules.
+        You have the following sources of information. Use them according to the rules.
         1. **Retrieved Modules**: 
-            - These are verified modules found in the literature for each conceptual step in the user's requirements, incorporating the technical methods, data processing approaches, and the specific algorithms.
-            - Use them to fill in the technical implementation of these specific nodes.
-            - Each module may have retrieved multiple nodes with similar functions. You need to conduct appropriate screening to be able to assemble a complete process.
+            - These are modules extracted from the domain-specific literature that are similar to each conceptual step. Their descriptions include their functions, data processing methods and specific technical methods.
+            - Refer to them to fill in the technical implementation of these specific nodes.
+            - Each conceptual step may have retrieved multiple nodes with similar functions. You need to conduct appropriate screening or combination to be able to assemble a complete process.
         2. **Structural Paths**: 
-            - These are retrieved connection paths for explicit data flows between nodes in the user's requirements.
+            - These are retrieved data flow connections between conceptual steps derived from the user's requirements.
             - Use them to determine HOW the user's nodes should be connected.
-            - If the paths suggest an intermediate node is needed (e.g., Sensor -> [Buffer] -> LLM), you should add it.
-        3. **Reference Skeletons**: 
-            - These are retrieved workflows found in the literature that are similar to the user's requirements.
-            - Use them ONLY to enrich the pipeline, that is, to borrow auxiliary modules (like databases, UI, pre-processors) from the Skeleton to make it a complete, robust system.
-        For the entire system architecture, here is the most similar system found in the literature.
+            - If the paths suggest the need for an intermediate node (e.g., Sensor -> [Buffer] -> LLM), then such a node should be added.
 
         ## Data Sources
         Added Nodes by Divergent Planner: ```{added_nodes_text}```\n\n
         Retrieved Modules: ```{json.dumps(slim_retrieved_info, ensure_ascii=False, indent=2)}```\n\n
         Structural Paths: ```{hints_text}```\n\n
-        Reference Skeletons: ```{skeletons_text}```\n\n
         
         ## TASK
-        Select the appropriate nodes from the retrieved nodes, conceive the complete data link and functional architecture, and ultimately synthesize a cohesive flowchart/architecture diagram. 
-        ### Critical Rules
-        1. **Connect the Flow**: Use the topology info to decide logical connections. If Module A usually follows Module B in Paper X, try to preserve that flow if it fits.
-        2. **Cite Sources**: Reference the original papers where the nodes are from.
-        3. **Redundancy Check**: REMOVE redundant nodes and connections. 
-        4. **Incorporate Divergent Ideas**: Ensure the added nodes from the divergent planner are integrated meaningfully.
+        Conceive the complete data link and functional architecture, and ultimately synthesize a cohesive flowchart/architecture diagram. 
+        ### Steps and Rules 
+        1. **Define Modules**: Sort out user requirements and retrieved information and define the necessary modules in the entire architecture.
+            - DO NOT use reference as module name or id. Name them concisely and meaningfully, and align to the current context. 
+            - Ensure the added nodes from the divergent plans are integrated meaningfully.
+            - If there are subnodes within the modules (based on the retrieved information and relevant to the current context), they should also be defined.
+        2. **Connect the Flow**: Use the topology info to decide logical connections. 
+            - All the connections should be implemented from the modules defined above. Do not include any other nodes, especially when defining the source_mod and the target_mod in ports.
+            - If Module A usually follows Module B in Paper X, try to preserve that flow if it fits.
+
+        3. **Check the architecture**:
+            - REMOVE redundant nodes and connections (perform the same function even with different names).
+            - REMOVE or RECHECK any nodes that are isolated or unused.
         
-        Final Output Structure (in JSON format)
+        ### Final Output Structure (in JSON format)
         {{
             "overall_description": "...",
             "module_details": [
@@ -590,10 +632,10 @@ class IntegratorAgent:
                     "technical_methods": "the technical methods used in this module",
                     "references": "the code of the referenced module (if any). Use 'None' if not available.",
                     "sub_nodes":[
-                        "<sub_node name (if any)>": {{
-                            "name": "the sub node name",
-                            "function": "the functions of this sub node",
-                            "technical_methods": "the technical methods used in this sub node",
+                        {{
+                            "name": "the sub node name (if any)",
+                            "function": "the functions of this sub node (if any)",
+                            "technical_methods": "the technical methods used in this sub node (if any)",
                         }}
                     ],
                     "ports": {{
@@ -646,24 +688,32 @@ class DrawerAgent:
         
         ## Input Architecture
         {arch_plan}
+
+        ## Mapping Rules
+        1. arch_plan["module_details"] -> nodes
+            - Nodes are only represented by their ids and names, without any other information appearing in the diagram (including functions, technical methods, and references).
+        2. arch_plan["module_details"]["sub_nodes"] -> subnodes (if any) 
+            - Use subgraphs to represent modules if there are more than one subnodes and data flow between them in a single module. 
+            - DO NOT use subgraphs if there is only one node and the name of the node is the same as the module name.
+            - Use connection lines to represent the data flow sequence of subnodes within a module.
+        3. arch_plan["module_details"]["ports"] -> edges
+            - "target_mod" and "source_mod" represent the module id.
+            - "target_node" and "source_node" represent the node id (within the target module and source module respectively).
+            - "edge_label" represents the label of the edge. 
+        DO NOT add any extra nodes or edges!
         
-        ## Requirements
+        ## Drawing Rules
         1. Use 'graph TD' (top-down) layout.
-        2. Map 'anchors' to nodes. Use the 'user_term' as the node text.
-           - Ensure node IDs are simple and safe (e.g., Node1, Node2).
-           - Add descriptive labels if available.
-        3. Map 'relations' to edges.
-           - 'DATAFLOW' type -> arrow `-->`
-           - 'CONTAINS' type -> subgraph structure. 
-             If A contains B, generate:
-             subgraph A
-                B
-             end
-           - [CRITICAL] Edge Labels:
-             - Put descriptive text ON THE EDGE, not inside the node name.
-             - Format: `NodeA -->|description| NodeB`
-             - Do NOT change the node ID or Label to include the description.
-        5. Output Format:
+        2. For EDGES:
+            - Put descriptive text ON THE EDGE, not inside the node name.
+            - Format: `NodeA -->|description| NodeB`
+            - Do NOT change the node ID or Label to include the description.
+        3. Avoid Errors:
+            - Always enclose the labels with double quatation marks.
+            - DO NOT include style attributes.
+            - NO 'click' events or 'class' identification.
+            - The **subgraph** has been correctly defined and an end marker "end" has been added.
+        4. Output Format:
            - Return a JSON object with a single key "mermaid_code".
            - The value should be the pure Mermaid code string.
            - Example: {{ "mermaid_code": "graph TD\\n..." }}
@@ -712,7 +762,7 @@ class DrawerAgent:
 
         return code
             
-def run_pipeline(user_query, num_outputs=3):
+def run_pipeline(user_query, num_outputs=1, divergence=True):
     vector_store, graph_store = load_stores()
     planner = PlannerAgent(client, graph_store)
     retriever = RetrieverAgent(vector_store, graph_store, client)
@@ -721,11 +771,7 @@ def run_pipeline(user_query, num_outputs=3):
 
     arch_plan = planner.extract_arch(user_query)
     # print(arch_plan)
-    skeletons = retriever.retrieve_for_skeleton(arch_plan["design_goal"])
-    filtered_skeletons = retriever.rerank_with_llm(user_query, skeletons)
     user_relations = arch_plan["relations"]
-
-    target_skeletons = filtered_skeletons[:num_outputs]
     
     results = []
     structural_hints = retriever.retrieve_structure_paths(user_relations)
@@ -736,15 +782,17 @@ def run_pipeline(user_query, num_outputs=3):
 
     # === Pre-calculate Divergent Plans for ALL Options ===
     # Notice: We generate divergent plans for ALL requested outputs
-    divergent_plans = planner.divergent_planning(
-        user_query=user_query,
-        base_anchors=arch_plan["anchors"],
-        num_outputs=num_outputs
-    )
+    if divergence:
+        divergent_plans = planner.divergent_planning(
+            user_query=user_query,
+            base_anchors=arch_plan["anchors"],
+            num_outputs=num_outputs
+        )
+    else:
+        divergent_plans = None
 
     # === Step 1: Global Retrieval for Base Anchors (Higher Recall) ===
     print(f"\n🎯 Retrieving Base Anchors (Top-6 for richer context)...")
-    # Base anchors are standard components, we don't need their confusing local topology
     base_nodes_map = retriever.retrieve_for_module(arch_plan["anchors"], top_k=6, include_topology=False)
     
     # Process base nodes into standard format
@@ -752,7 +800,6 @@ def run_pipeline(user_query, num_outputs=3):
     for anchor_name, retrieved_list in base_nodes_map.items():
         anchor_nodes = []
         for node_with_score in retrieved_list:
-            # Handle potential None result if retrieval failed partially
             if not node_with_score: continue
             
             node = node_with_score.node
@@ -766,58 +813,64 @@ def run_pipeline(user_query, num_outputs=3):
         base_ref_info[anchor_name] = anchor_nodes
 
     # === Generate Options ===
-    # TODO: skeleton在这里的作用先暂时忽略，可能后续作为divergent_planner的参考
-    for i in range(num_outputs):
-        # Use skeletons cyclically if we have fewer skeletons than requested outputs
-        # skeleton_idx = i % len(target_skeletons)
-        # s = target_skeletons[skeleton_idx]
-        
-        print(f"\n{'='*60}")
-        # print(f"=== Generating Option {i+1} using Skeleton {skeleton_idx} ===")
-        print(f"{divergent_plans[i]}\n")
+    # === Generate Options ===
+    target_iterations = num_outputs if divergence else 1
+    
+    for i in range(target_iterations):
         
         current_ref_info = base_ref_info.copy()
-
+        
+        d_plan = None
         # Apply Divergent Plan (if available)
+        if divergent_plans and i < len(divergent_plans):
+            d_plan = divergent_plans[i]
+            print(f"\n{'='*60}")
+            print(f"{d_plan}\n")
         
-        d_plan = divergent_plans[i]
-        additional_anchors = d_plan.get("additional_anchors", [])
-        perspective = d_plan.get("perspective", "Enhanced")
-        rationale = d_plan.get("rationale", "")
-        
-        print(f"Applying Divergent Perspective: {perspective}")
-        print(f"Rationale: {rationale}")
-        
-        if additional_anchors:
-            # Divergent anchors are new ideas, their topology is valuable context
-            additional_map = retriever.retrieve_for_module(additional_anchors, top_k=3, include_topology=True)
-            for anchor_name, retrieved_list in additional_map.items():
-                # Note: We append, so if multiple plans use same anchor name, it overwrites. 
-                # Ideally divergent anchors have unique user_terms.
-                current_ref_info[anchor_name] = []
-                for node_with_score in retrieved_list:
-                    node = node_with_score.node
-                    current_ref_info[anchor_name].append({
-                        'id': node.id_,
-                        'text': node.text,
-                        'score': node_with_score.score,
-                        'structural_path': node.metadata.get('topology', None),
-                        'metadata': dict(node.metadata)
-                    })
+        if d_plan:
+            additional_anchors = d_plan.get("additional_anchors", [])
+            perspective = d_plan.get("perspective", "Enhanced")
+            rationale = d_plan.get("rationale", "")
+            
+            print(f"Applying Divergent Perspective: {perspective}")
+            print(f"Rationale: {rationale}")
+            
+            if additional_anchors:
+                # Divergent anchors are new ideas, their topology is valuable context
+                additional_map = retriever.retrieve_for_module(additional_anchors, top_k=3, include_topology=True)
+                for anchor_name, retrieved_list in additional_map.items():
+                    # Note: We append, so if multiple plans use same anchor name, it overwrites. 
+                    # Ideally divergent anchors have unique user_terms.
+                    current_ref_info[anchor_name] = []
+                    for node_with_score in retrieved_list:
+                        node = node_with_score.node
+                        current_ref_info[anchor_name].append({
+                            'id': node.id_,
+                            'text': node.text,
+                            'score': node_with_score.score,
+                            'structural_path': node.metadata.get('topology', None),
+                            'metadata': dict(node.metadata)
+                        })
+            else:
+                print(f"No additional anchors suggested for this plan")
         else:
-            print(f"No additional anchors suggested for this plan")
-
-        additional_desc = f"Perspective: {perspective}\nRationale: {rationale}\n"
+            # Fallback / Standard mode
+            additional_anchors = []
+            print(f"\n{'='*60}")
+            print(f"Generating Standard Plan (Option {i+1})\n")
         
         print(f"\n📦 Retrieved modules summary for Option {i+1}:")
         print(f"Base Anchors: {len(base_ref_info)} keys")
         print(f"Total Anchors: {len(current_ref_info)} keys")
         
+        # Integrate query context
+        full_query = user_query
+        if d_plan:
+             full_query += "; Perspective: "+d_plan.get("perspective", "")+"; Rationale: "+d_plan.get("rationale", "")
+
         # Generate architecture using the MERGED retrieved modules
         new_arch = integrator.integrate_arch(
-            query=user_query+"; Perspective: "+d_plan.get("perspective", "")+"; Rationale: "+d_plan.get("rationale", ""), 
-            # skeletons=[s],
-            skeletons=None, 
+            query=full_query, 
             retrieved_info=current_ref_info, 
             structural_hints=structural_hints,
             added_nodes=additional_anchors
@@ -853,11 +906,11 @@ def run_pipeline(user_query, num_outputs=3):
 
 
 if __name__ == "__main__":
-    query = "design a VR system supporting gesture interaction"
-    results = run_pipeline(query)
-    # vector_store, graph_store = load_stores()
-    # planner = PlannerAgent(client, graph_store)
-    # arch_plan = planner.extract_arch(query)
-    # divergent_plans = planner.divergent_planning(query, arch_plan["anchors"], num_outputs=3)
-    # print(divergent_plans)
+    query = "design a system for coding education towards children"
+    # results = run_pipeline(query)
+    vector_store, graph_store = load_stores()
+    planner = PlannerAgent(client, graph_store)
+    arch_plan = planner.extract_arch(query)
+    divergent_plans = planner.divergent_planning(query, arch_plan["anchors"], num_outputs=3)
+    print(divergent_plans)
     

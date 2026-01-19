@@ -6,6 +6,10 @@ This script implements:
 2. Leiden algorithm for hierarchical clustering (with smart stopping)
 3. LLM-based community summarization (with caching and few-shot prompting)
 4. Writing community_id back to the database (with cleanup)
+
+Adjusting Cluster granularity:
+    - increase the resolution, e.g. res=1.5
+    - increase the MIN_SIMILARITY, e.g. MIN_SIMILARITY = 0.6
 """
 
 import os
@@ -191,7 +195,7 @@ class GraphClustering:
             if current_graph.number_of_nodes() < 2:
                 break
                 
-            res = 1.0 if level == 0 else 0.8 # Slightly looser for higher levels
+            res = 1.5 if level == 0 else 0.8 # Slightly looser for higher levels
             partition = community_louvain.best_partition(current_graph, weight='weight', resolution=res)
             unique_comms = set(partition.values())
             curr_community_count = len(unique_comms)
