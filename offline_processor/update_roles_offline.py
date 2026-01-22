@@ -11,13 +11,16 @@ BASE_URL = "https://poloai.top/v1"
 # Taxonomy Definition
 TAXONOMY = """
 1. **user_entity**
-    - target_user: the user who is the final user of the system
-    - stakeholder: observer or assistant, e.g., instructor, researcher
+    - primary_user: the user who is the final user of the system
+    - secondary_user: stakeholder, observer or assistant, e.g., instructor, researcher
+    - agents: non-human agents that can running independently (outside the system), e.g., robots, collaborative AI
 2. **sensing_input**
     - bio_sensor: internal human physiological signals, e.g., EEG, EMG, ECG
     - behavior_sensor: external human behaviors/movements. e.g., IMU, eye tracker, motion capture
     - env_sensor: environment perception, e.g., RGB Camera, temperature sensor
     - direct_input: direct human-computer interaction input based on interfaces, e.g., Keyboard, Mouse, Touchscreen
+    - system_context: equipment, system status and application log, etc.
+    - data_import: offline documents, knowledge base, third-party API stream that serve as inputs
 3. **processing_core**
     - signal_optimization: making the signal cleaner without changing the data type, e.g., filter, normalizer
     - feature_extraction: convert raw high-dimensional data (images, audio streams) into structured features or symbolic representations, e.g., gaze tracker, pose estimator, speech-to-text
@@ -32,6 +35,8 @@ TAXONOMY = """
 5. **infrastructure**
     - data_storage: storage unit, e.g., vector DB, Database, Knowledge graph
     - communication: e.g., HTTP Server, WebSocket, Bluetooth
+    - model_lifecycle: model repository/version, training and post-training pipeline, online learning, etc. 
+    - personalization_store: user persona, prefenrence, threshold / calibration parameters, etc.
 """
 
 http_client = httpx.Client(proxy=None, trust_env=False)

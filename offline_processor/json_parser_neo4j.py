@@ -3,6 +3,7 @@ import os
 import shutil
 import uuid
 import re
+import sys
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
 from llama_index.core import PropertyGraphIndex, StorageContext

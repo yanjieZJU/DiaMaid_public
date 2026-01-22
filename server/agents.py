@@ -26,13 +26,16 @@ client = OpenAI(
 
 TAXONOMY = """
 1. **user_entity**
-    - target_user: the user who is the final user of the system
-    - stakeholder: observer or assistant, e.g., instructor, researcher
+    - primary_user: the user who is the final user of the system
+    - secondary_user: stakeholder, observer or assistant, e.g., instructor, researcher
+    - agents: non-human agents that can running independently (outside the system), e.g., robots, collaborative AI
 2. **sensing_input**
     - bio_sensor: internal human physiological signals, e.g., EEG, EMG, ECG
-    - behavior_sensor: exernal human behaviors/movements. e.g., IMU, eye tracker, motion capture
+    - behavior_sensor: external human behaviors/movements. e.g., IMU, eye tracker, motion capture
     - env_sensor: environment perception, e.g., RGB Camera, temperature sensor
     - direct_input: direct human-computer interaction input based on interfaces, e.g., Keyboard, Mouse, Touchscreen
+    - system_context: equipment, system status and application log, etc.
+    - data_import: offline documents, knowledge base, third-party API stream that serve as inputs
 3. **processing_core**
     - signal_optimization: making the signal cleaner without changing the data type, e.g., filter, normalizer
     - feature_extraction: convert raw high-dimensional data (images, audio streams) into structured features or symbolic representations, e.g., gaze tracker, pose estimator, speech-to-text
@@ -47,6 +50,8 @@ TAXONOMY = """
 5. **infrastructure**
     - data_storage: storage unit, e.g., vector DB, Database, Knowledge graph
     - communication: e.g., HTTP Server, WebSocket, Bluetooth
+    - model_lifecycle: model repository/version, training and post-training pipeline, online learning, etc. 
+    - personalization_store: user persona, prefenrence, threshold / calibration parameters, etc.
 """
 
 class PlannerAgent:
@@ -125,8 +130,8 @@ class PlannerAgent:
             
             ## Task
             Given a user query with a user-constructed workflow, output its normalized structure in JSON code.
-            1. Identify mandatory components (anchors) and the conenction topology (including parallel connections, data flows, subgraphs, etc. if any) from user query. It might involve the functions that need to be implemented, the technical modules, fixed inputs/outputs, etc.
-            2. Complete the design goal based on these anchors and relations which were not originally included in the original query.
+            1. Identify mandatory components (anchors) and the connection topology (including parallel connections, data flows, subgraphs, etc. if any) from user query. 
+            2. Extract **ONLY** the entities explicitly mentioned in the user query or those strictly implied as standard infrastructure (e.g., a database if "save data" is mentioned). **DO NOT** invent new functional modules that were not requested.
             3. For each anchor: based on the user's requirements and the current context, infer the user's expectations for each anchor (their role within the entire workflow), and formulate a concise description.
             4. Extract ALL user defined relations (explicit) from the user query. For example, the arrow '-->' means the data flow from source to target, the use of subgraph means the inclusion relationship. DO NOT REPEAT.
             5. For each anchor, you must also infer its functional role based on the following taxonomy:
@@ -134,7 +139,7 @@ class PlannerAgent:
             (Output the Level 1 category, or 'Level 1: Level 2' if you are sure)
             Output Structure (in JSON format)
             {{
-                "design_goal": "...",
+                "design_goal": "A concise summary of the system's purpose based strictly on the query.",
                 "anchors": [
                     {{
                         "user_term": "the user term for this anchor, e.g., AI tutor",
@@ -206,6 +211,9 @@ class PlannerAgent:
         # - Plan 0 (if num_outputs > 0) -> Near Field (Top 1) -> "Deep Dive"
         # - Plan 1..N -> Far Field (Random from score 0.3 - 0.6) -> "Cross-domain Transfer"
         
+        # Enforce max outputs to 3 as requested
+        num_outputs = min(max(1, num_outputs), 3)
+
         selected_references = []
         
         # A. Near Field (Top 1)
@@ -221,8 +229,8 @@ class PlannerAgent:
             print(f"🎯 Near-Field Context: {self.topology_knowledge['scene_clusters'][near_cluster_id]['name'][:50]}... (Score: {near_score:.2f})")
 
         # B. Far Field (Random Sampling)
-        # Filter for mid-range scores (e.g., 0.35 to 0.65) to ensure relevance but difference
-        far_candidates = [c for c in scored_clusters if 0.3 <= c[1] <= 0.6]
+        near_id_set = {scored_clusters[0][0]} if scored_clusters else set()
+        far_candidates = [c for c in scored_clusters if 0.3 <= c[1] <= 0.6 and c[0] not in near_id_set]
         
         needed_far = max(0, num_outputs - 1)
         if far_candidates and needed_far > 0:
@@ -323,6 +331,7 @@ class PlannerAgent:
         ## General Constraint
         1. **Incremental Only**: 
            - Do NOT repeat the Base Anchors. Output ONLY the ADDITIONAL components (modules).
+           - **CRITICAL**: Do NOT propose modules that are merely synonyms or simple rephrasings of Base Anchors (e.g., if "Tutor" exists, do not add "Instructor Agent"). New anchors must add **distinct new functionality**.
         2. **Specific Anchors**:
            - Each additional component must have a 'user_term', a 'description', a 'role', and a 'community_id' (from the reference source).
            - Recheck data flow logic.
@@ -353,7 +362,7 @@ class PlannerAgent:
         print(f"\n🧠 Generating {num_outputs} divergent plans...")
         try:
             response = self.client.chat.completions.create(
-                model="gpt-4o",
+                model="gpt-4o-2024-11-20",
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.9, # Higher temperature for creativity
                 response_format={"type": "json_object"},
@@ -611,11 +620,12 @@ class IntegratorAgent:
         Conceive the complete data link and functional architecture, and ultimately synthesize a cohesive flowchart/architecture diagram. 
         ### Steps and Rules 
         1. **Define Modules**: Sort out user requirements and retrieved information and define the necessary modules in the entire architecture.
-            - DO NOT use reference as module name or id. Name them concisely and meaningfully, and align to the current context. 
+            - **Naming Rule**: Use **Generic Functional Names** (e.g., "Gaze Tracker", "Dialogue Manager") for the modules. **DO NOT** use specific paper titles, citation indices, or long implementation names (e.g. NOT "Gaze360: Physically Unconstrained...").
             - Ensure the added nodes from the divergent plans are integrated meaningfully.
             - If there are subnodes within the modules (based on the retrieved information and relevant to the current context), they should also be defined.
         2. **Connect the Flow**: Use the topology info to decide logical connections. 
             - All the connections should be implemented from the modules defined above. Do not include any other nodes, especially when defining the source_mod and the target_mod in ports.
+            - **Graph Cleaning**: Merge parallel edges between the same two nodes. Do not create 'shadow' nodes that duplicate existing functions. Ensure the graph is a single connected component if possible.
             - If Module A usually follows Module B in Paper X, try to preserve that flow if it fits.
 
         3. **Check the architecture**:
@@ -630,6 +640,7 @@ class IntegratorAgent:
                     "name": "the module name",
                     "function": "the functions of this module",
                     "technical_methods": "the technical methods used in this module",
+                    "role": "choose from ["input", "output", "processing", "data"]",
                     "references": "the code of the referenced module (if any). Use 'None' if not available.",
                     "sub_nodes":[
                         {{
@@ -642,15 +653,24 @@ class IntegratorAgent:
                         "incoming (if any)": [
                             {{
                                 "source_mod": "the identifier of the incoming module",
-                                "source_node (if any)": "the identifier of the incoming node",
+                                "source_node": "the identifier of the incoming node. If the source module has subnodes, use the subnode identifier that the incoming edge connects to. Else, use `None` means the data flow from the module.",
+                                "connects_to_internal_node": "the identifier of the internal subnode that the incoming edge connects to. If the incoming edge connects to the module, use `None`.",
                                 "edge_label": "the label of the incoming edge, i.e., the meaning of the data flow",
                             }}
                         ],
                         "outgoing (if any)": [
                             {{
                                 "target_mod": "the identifier of the outgoing module",
-                                "target_node (if any)": "the identifier of the outgoing node",
+                                "target_node": "the identifier of the outgoing node. If the target module has subnodes, use the subnode identifier that the outgoing edge connects to. Else, use `None` means the data flow to the module.",
+                                "originates_from_internal_node": "the identifier of the internal subnode that the outgoing edge originates from. If the outgoing edge originates from the module, use `None`.",
                                 "edge_label": "the label of the outgoing edge, i.e., the meaning of the data flow",
+                            }}
+                        ],
+                        "internal_flow (if any that happens within the module, from one subnode to another)": [
+                            {{
+                                "from": "the identifier of the subnode",
+                                "to": "the identifier of the subnode",
+                                "edge_label": "the label of the internal edge, i.e., the meaning of the data flow",
                             }}
                         ]
                     }}
@@ -660,7 +680,7 @@ class IntegratorAgent:
     """
         try:
             response = self.client.chat.completions.create(
-                model="gpt-4o",
+                model="gpt-4o-2024-11-20",
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.9,
                 response_format={"type": "json_object"},
@@ -699,7 +719,9 @@ class DrawerAgent:
         3. arch_plan["module_details"]["ports"] -> edges
             - "target_mod" and "source_mod" represent the module id.
             - "target_node" and "source_node" represent the node id (within the target module and source module respectively).
+            - "connects_to_internal_node" and "originates_from_internal_node" represent the subnode id (within the target module and source module respectively).
             - "edge_label" represents the label of the edge. 
+        4. arch_plan["module_details"]["ports"]["internal_flow"] -> internal edges (if any)
         DO NOT add any extra nodes or edges!
         
         ## Drawing Rules
@@ -720,7 +742,7 @@ class DrawerAgent:
     """
         try: 
             response = self.client.chat.completions.create(
-                model="gpt-4o",
+                model="qwen3-vl-plus",
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.7,
                 response_format={"type": "json_object"},
@@ -835,6 +857,8 @@ def run_pipeline(user_query, num_outputs=1, divergence=True):
             print(f"Applying Divergent Perspective: {perspective}")
             print(f"Rationale: {rationale}")
             
+            additional_desc = f"**Perspective**: {perspective}\n**Rationale**: {rationale}\n\n"
+            
             if additional_anchors:
                 # Divergent anchors are new ideas, their topology is valuable context
                 additional_map = retriever.retrieve_for_module(additional_anchors, top_k=3, include_topology=True)
@@ -856,6 +880,8 @@ def run_pipeline(user_query, num_outputs=1, divergence=True):
         else:
             # Fallback / Standard mode
             additional_anchors = []
+            perspective = "Standard"
+            additional_desc = ""
             print(f"\n{'='*60}")
             print(f"Generating Standard Plan (Option {i+1})\n")
         
@@ -907,10 +933,10 @@ def run_pipeline(user_query, num_outputs=1, divergence=True):
 
 if __name__ == "__main__":
     query = "design a system for coding education towards children"
-    # results = run_pipeline(query)
-    vector_store, graph_store = load_stores()
-    planner = PlannerAgent(client, graph_store)
-    arch_plan = planner.extract_arch(query)
-    divergent_plans = planner.divergent_planning(query, arch_plan["anchors"], num_outputs=3)
-    print(divergent_plans)
+    results = run_pipeline(query, num_outputs=1)
+    # vector_store, graph_store = load_stores()
+    # planner = PlannerAgent(client, graph_store)
+    # arch_plan = planner.extract_arch(query)
+    # divergent_plans = planner.divergent_planning(query, arch_plan["anchors"], num_outputs=3)
+    # print(divergent_plans)
     

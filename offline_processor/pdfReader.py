@@ -3,20 +3,20 @@ import time
 import httpx
 import os
 import json
+import sys
 from PyPDF2 import PdfReader  # 添加PDF读取库
-
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from config import *
 # ================= 配置区域 =================
 
 # OpenAI API配置（中转API）
-OPENAI_API_KEY = "sk-HOhPpbrbpl2pEa9UU6BGea6I2O93cLYX1eS342bLaMypwvlc"  # 请替换为你的OpenAI API密钥
-OPENAI_BASE_URL = "https://poloai.top/v1"  # 中转API地址
 http_client = httpx.Client(proxy=None, trust_env=False)
 
 
 # 配置 OpenAI SDK
 client = openai.OpenAI(
-    api_key=OPENAI_API_KEY,
-    base_url=OPENAI_BASE_URL,
+    api_key=os.getenv("OPENAI_API_KEY"),
+    base_url=os.getenv("OPENAI_BASE_URL"),
     http_client=http_client
 )
 
@@ -80,7 +80,7 @@ def chat_with_pdf_openai(pdf_file_path, query):
     # 使用OpenAI API生成回答
     try:
         response = client.chat.completions.create(
-            model="gemini-2.5-flash",  # 使用OpenAI支持的模型
+            model="claude-opus-4-5-20251101",  # 使用OpenAI支持的模型
             messages=[
                 {"role": "system", "content": full_prompt},
                 {"role": "user", "content": pdf_content}
@@ -125,7 +125,7 @@ def save_json_response(response_text, pdf_filename):
         if json_data:
             # 生成输出文件名（去除.pdf扩展名，添加.json）
             base_name = os.path.splitext(os.path.basename(pdf_filename))[0]
-            output_file = os.path.join(json_output_dir, f"{base_name}.json")
+            output_file = os.path.join(json_output_dir, f"{base_name}_claude.json")
             
             # 保存JSON到文件
             with open(output_file, 'w', encoding='utf-8') as f:
@@ -148,7 +148,7 @@ if __name__ == "__main__":
     image_extactor_prompt = load_prompt_from_file()
     
     # 替换成你本地的 PDF 路径
-    pdf_folder = "./case_llm_artifact"
+    pdf_folder = "./case_llm_artifact/original_articles"
     
     # 确保输出目录存在
     json_output_dir = "./case_llm_artifact/json_files"
@@ -162,50 +162,50 @@ if __name__ == "__main__":
     processed_count = 0
     error_count = 0
     
-    # file_name = "Court to conversation_tactical badminton analysis via computer vision and RAG-enhanced LLM.pdf"
-    # file_path = os.path.join(pdf_folder, file_name)
-    # answer = chat_with_pdf_openai(file_path, image_extactor_prompt)
-    # if answer:
-    #     save_json_response(answer, file_name)
+    file_name = "3613904.3641915.pdf"
+    file_path = os.path.join(pdf_folder, file_name)
+    answer = chat_with_pdf_openai(file_path, image_extactor_prompt)
+    if answer:
+        save_json_response(answer, file_name)
     
     # 遍历目录中的所有PDF文件
-    for filename in os.listdir(pdf_folder):
+    # for filename in os.listdir(pdf_folder):
 
-        if filename.endswith(".pdf"):
-            # Check if JSON file already exists
-            base_name = os.path.splitext(filename)[0]
-            expected_json_path = os.path.join(json_output_dir, f"{base_name}.json")
+    #     if filename.endswith(".pdf"):
+    #         # Check if JSON file already exists
+    #         base_name = os.path.splitext(filename)[0]
+    #         expected_json_path = os.path.join(json_output_dir, f"{base_name}.json")
             
-            if os.path.exists(expected_json_path):
-                print(f"跳过 {filename}: JSON 结果已存在于 {expected_json_path}")
-                continue
+    #         if os.path.exists(expected_json_path):
+    #             print(f"跳过 {filename}: JSON 结果已存在于 {expected_json_path}")
+    #             continue
 
-            pdf_path = os.path.join(pdf_folder, filename)
-            print(f"正在处理: {pdf_path}")
+    #         pdf_path = os.path.join(pdf_folder, filename)
+    #         print(f"正在处理: {pdf_path}")
             
-            try:
-                # 直接使用OpenAI中转API处理PDF内容
-                print("正在调用OpenAI中转API...")
-                answer = chat_with_pdf_openai(pdf_path, image_extactor_prompt)
+    #         try:
+    #             # 直接使用OpenAI中转API处理PDF内容
+    #             print("正在调用OpenAI中转API...")
+    #             answer = chat_with_pdf_openai(pdf_path, image_extactor_prompt)
                 
-                if answer:
-                    print("\n" + "="*20 + " LLM 回答 " + "="*20 + "\n")
-                    print(answer[:500] + "..." if len(answer) > 500 else answer)  # 只显示前500字符
+    #             if answer:
+    #                 print("\n" + "="*20 + " LLM 回答 " + "="*20 + "\n")
+    #                 print(answer[:500] + "..." if len(answer) > 500 else answer)  # 只显示前500字符
                     
-                    # 保存JSON响应
-                    if save_json_response(answer, filename):
-                        print(f"成功处理: {filename}")
-                        processed_count += 1
-                    else:
-                        print(f"处理失败: {filename}")
-                        error_count += 1
-                else:
-                    print(f"处理失败: {filename}")
-                    error_count += 1
+    #                 # 保存JSON响应
+    #                 if save_json_response(answer, filename):
+    #                     print(f"成功处理: {filename}")
+    #                     processed_count += 1
+    #                 else:
+    #                     print(f"处理失败: {filename}")
+    #                     error_count += 1
+    #             else:
+    #                 print(f"处理失败: {filename}")
+    #                 error_count += 1
                 
-            except Exception as e:
-                print(f"处理 {filename} 时发生错误: {e}")
-                error_count += 1
-                continue
+    #         except Exception as e:
+    #             print(f"处理 {filename} 时发生错误: {e}")
+    #             error_count += 1
+    #             continue
     
-    print(f"\n处理完成! 成功处理 {processed_count} 个文件，{error_count} 个文件出错。")
+    # print(f"\n处理完成! 成功处理 {processed_count} 个文件，{error_count} 个文件出错。")

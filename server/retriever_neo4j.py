@@ -53,16 +53,20 @@ def custom_retrieve(query_text, vector_store, graph_store, top_k, node_type=None
     # CASE A: Structure-Based Retrieval (Community ID provided)
     if community_id:
         print(f"   🎯 Targeted Retrieval in Community: {community_id}")
-        with graph_store._driver.session() as session:
-            # Fetch all candidate IDs in this community
+        
+        def _fetch_community_candidates(tx, comm_id, role_filter):
             cypher = """
             MATCH (n:LlamaNode {community_L0: $comm_id})
             WHERE n.type = 'MODULE'
             AND ($role_filter IS NULL OR replace(toLower(n.role), ' ', '') CONTAINS replace(toLower($role_filter), ' ', ''))
             RETURN n.id as id
             """
-            result = session.run(cypher, comm_id=community_id, role_filter=role_filter)
-            candidate_ids = [r["id"] for r in result]
+            result = tx.run(cypher, comm_id=comm_id, role_filter=role_filter)
+            return [r["id"] for r in result]
+
+        with graph_store._driver.session() as session:
+            # Fetch all candidate IDs in this community
+            candidate_ids = session.execute_read(_fetch_community_candidates, community_id, role_filter)
             
         print(f"      Found {len(candidate_ids)} candidates in graph.")
         
@@ -120,39 +124,42 @@ def custom_retrieve(query_text, vector_store, graph_store, top_k, node_type=None
         print(f"   -> Vector Search found {len(found_ids)} candidate IDs.")
 
     retrieved_nodes = []
+
+    def _fetch_node_details(tx, node_id, role_filter, skip_role):
+        cypher = """
+        MATCH (center:LlamaNode) WHERE center.id = $id 
+        // Role Filtering (ignore case and spaces) - ONLY apply if not already filtered by community logic
+        AND ($skip_role_check = true OR $role_filter IS NULL OR replace(toLower(center.role), ' ', '') CONTAINS replace(toLower($role_filter), ' ', ''))
+        WITH center
+        OPTIONAL MATCH (center)-[r:FLOWS_TO]->(next:LlamaNode)
+        WITH center, collect(distinct {name: next.name, id: next.id, function: next.text, code: next.code, edge_label:r.edge_label, properties: properties(r)}) as downstreams
+        OPTIONAL MATCH (prev:LlamaNode)-[r:FLOWS_TO]->(center)
+        WITH center, downstreams, collect(distinct {name: prev.name, id: prev.id, function: prev.text, code: prev.code, edge_label:r.edge_label, properties: properties(r)}) as upstreams   
+        // 如果是WORKFLOW节点，获取依赖的工作流
+        OPTIONAL MATCH (center)-[:DEPENDS_ON]->(dep_wf:LlamaNode)
+        WITH center, upstreams, downstreams, collect(distinct {name: dep_wf.name, id: dep_wf.id, function: dep_wf.text, code: dep_wf.code}) as dependencies
+        // 获取源文件信息
+        RETURN 
+            center, 
+            center.source as source_file,
+            center.community_L0 as comm_id,
+            center.summary_L0 as comm_summary,
+            upstreams,
+            downstreams,
+            dependencies
+        """
+        return tx.run(cypher, id=node_id, role_filter=role_filter, skip_role_check=skip_role).single()
+
     with graph_store._driver.session() as session:
         for node_id, score in zip(found_ids, found_scores):
             # Stop if we have enough
             if len(retrieved_nodes) >= top_k:
                 break
-
-            cypher = """
-            MATCH (center:LlamaNode) WHERE center.id = $id 
-            // Role Filtering (ignore case and spaces) - ONLY apply if not already filtered by community logic
-            AND ($skip_role_check = true OR $role_filter IS NULL OR replace(toLower(center.role), ' ', '') CONTAINS replace(toLower($role_filter), ' ', ''))
-            WITH center
-            OPTIONAL MATCH (center)-[r:FLOWS_TO]->(next:LlamaNode)
-            WITH center, collect(distinct {name: next.name, id: next.id, function: next.text, code: next.code, edge_label:r.edge_label, properties: properties(r)}) as downstreams
-            OPTIONAL MATCH (prev:LlamaNode)-[r:FLOWS_TO]->(center)
-            WITH center, downstreams, collect(distinct {name: prev.name, id: prev.id, function: prev.text, code: prev.code, edge_label:r.edge_label, properties: properties(r)}) as upstreams   
-            // 如果是WORKFLOW节点，获取依赖的工作流
-            OPTIONAL MATCH (center)-[:DEPENDS_ON]->(dep_wf:LlamaNode)
-            WITH center, upstreams, downstreams, collect(distinct {name: dep_wf.name, id: dep_wf.id, function: dep_wf.text, code: dep_wf.code}) as dependencies
-            // 获取源文件信息
-            RETURN 
-                center, 
-                center.source as source_file,
-                center.community_L0 as comm_id,
-                center.summary_L0 as comm_summary,
-                upstreams,
-                downstreams,
-                dependencies
-            """
             
             # specific role check skip if we already filtered via community query
             skip_role = True if community_id else False
             
-            result = session.run(cypher, id=node_id, role_filter=role_filter, skip_role_check=skip_role).single()
+            result = session.execute_read(_fetch_node_details, node_id, role_filter, skip_role)
             
             if result:
                 center_node = result["center"]
@@ -195,10 +202,13 @@ def get_all_community_summaries(vector_store, graph_store):
     LIMIT 50
     """
     summaries = []
+    
+    def _fetch_summaries(tx):
+        result = tx.run(cypher)
+        return [f"[Community ID: {record['id']}]: {record['summary']}" for record in result]
+
     with graph_store._driver.session() as session:
-        result = session.run(cypher)
-        for record in result:
-            summaries.append(f"[Community ID: {record['id']}]: {record['summary']}")
+        summaries = session.execute_read(_fetch_summaries)
     return "\n".join(summaries)
 
 def retrieve_and_get_content(query, vector_store, graph_store, top_k=5, node_type=None, role_filter=None, community_id=None, include_topology=True):
@@ -293,11 +303,15 @@ def find_structural_path(source_text, target_text, vector_store, graph_store, re
         ORDER BY len ASC
         LIMIT 10
         """
+        def _find_paths(tx, src_ids, tgt_ids):
+            result = tx.run(cypher, src_ids=src_ids, tgt_ids=tgt_ids)
+            return list(result)
+
         with graph_store._driver.session() as session:
-            result = session.run(cypher, src_ids=src_ids, tgt_ids=tgt_ids)
+            records = session.execute_read(_find_paths, src_ids, tgt_ids)
             unique_signatures = set()
             
-            for record in result:
+            for record in records:
                 path_nodes = record["path_nodes"]
                 relations = record["relations"]
                 

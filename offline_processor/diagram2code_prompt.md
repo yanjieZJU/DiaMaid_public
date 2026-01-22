@@ -36,47 +36,50 @@ Else: return: {"arch_exist": False}; exit the processing
 For each workflow identified in step 2, use nodes (function modules) and edges (data flow) to represent them.
 ### Rules
 1. Each extracted module should have clear technical/functional independence, facilitating subsequent reuse or replacement.
-2. **Definition of nodes and edges**: A node is a function module that performs a specific technical function. An edge is a data flow between two nodes. Apart from *terminal(start and sink) and data store(e.g., database, knowledge base)*, all other intermediate artifacts should be stored on the data transmission path ('edge_label') instead of a node.
-3. **Grouping Rule**: If a sequence of steps (A->B->C) is tightly coupled and performs one technical function (e.g., "data cleaning"), group them if necessary, but prefer retaining technical details for implementation clarity. 
-4. **Node Labeling Rule**: The node identifier must reflect the actual function/content of the node (align with the figure) and **AVOID single-character or meaningless names**. Be loyal to the original diagram. Based on the mermaid syntax, replace spaces with underscores, and the node name should not include brackets or other special characters.
-5. **Cross-Reference With Full Text**: Cross-reference the diagram nodes with the paper's Methdology/Implementation sections to obtain detailed descriptions. Include specific algorithms, hardware specs, key parameters, etc. to fill the function and technical details of the module.
-6. Use **concise and clear** language. Omit filler words like "The module utilizes ..." or "In order to ..."
-7. **Port Consistency**: Ensure that the 'ports' definitions are consistent. For any connection A -> B, the 'outgoing' port of module A (target_mod=B) MUST EXACTLY correspond to the 'incoming' port of module B (source_mod=A), including the 'edge_label'.
+2. **Definition of nodes and edges**: Nodes are functional modules (sensing_input/processing_core/interface_output/content_generation). Terminals (start and sink) and human entities MUST NOT be nodes. Use interface modules to capture/emit signals. Data stores (e.g., databases, knowledge bases) are modules under infrastructure. All other intermediate artifacts should be stored on the data transmission path ('edge_label') instead of a node.
+3. For all endpoint modules that have no upstream or downstream connections, the missing direction must be explicitly indicated as **"NONE"**.
+4. **Grouping Rule**: If a sequence of steps (A->B->C) is tightly coupled and performs one technical function (e.g., "data cleaning"), group them if necessary, but prefer retaining technical details for implementation clarity. 
+5. **Node Labeling Rule**: The node identifier must reflect the actual function/content of the node (align with the figure) and **AVOID single-character or meaningless names**. Be loyal to the original diagram. Based on the mermaid syntax, replace spaces with underscores, and the node name should not include brackets or other special characters.
+6. **Cross-Reference With Full Text**: Cross-reference the diagram nodes with the paper's Methdology/Implementation sections to obtain detailed descriptions. Include specific algorithms, hardware specs, key parameters, etc. to fill the function and technical details of the module.
+7. Use **concise and clear** language. Omit filler words like "The module utilizes ..." or "In order to ..."
+8. **Port Consistency**: Ensure that the 'ports' definitions are consistent. For any connection A -> B, the 'outgoing' port of module A (target_mod=B) MUST EXACTLY correspond to the 'incoming' port of module B (source_mod=A), including the 'edge_label'.
 
 ### Role Taxonomy
 **STRICTLY SELECT FROM THE FOLLOWING LIST. DO NOT INVENT NEW ROLES.**
 Return the role in the format: "Category: Role" (e.g., "processing_core: feature_extraction").
 
-1. **user_entity**
-    - target_user: the user who is the final user of the system
-    - stakeholder: observer or assistant, e.g., instructor, researcher
-2. **sensing_input**
+1. **Category 1 - sensing_input**
     - bio_sensor: internal human physiological signals, e.g., EEG, EMG, ECG
     - behavior_sensor: external human behaviors/movements. e.g., IMU, eye tracker, motion capture
     - env_sensor: environment perception, e.g., RGB Camera, temperature sensor
     - direct_input: direct human-computer interaction input based on interfaces, e.g., Keyboard, Mouse, Touchscreen
-3. **processing_core**
+    - system_context: equipment, system status and application log, etc.
+    - data_import: offline documents, knowledge base, third-party API stream that serve as inputs
+2. **Category 2 - processing_core**
     - signal_optimization: making the signal cleaner without changing the data type, e.g., filter, normalizer
     - feature_extraction: convert raw high-dimensional data (images, audio streams) into structured features or symbolic representations, e.g., gaze tracker, pose estimator, speech-to-text
     - state_assessment: qualitative or quantitative evaluation of the extracted features (judge how good/bad/intense something is), e.g., emotion recognition, fatigue detection
     - decision_logic: determine the next step based on the state assessment, e.g., recommender logic, dialog manager (even if it uses an LLM, if the output is a control flag or strategy, it belongs here)
     - content_generation: e.g., text generation (llm, chatbot), image generation (diffusion model)
-4. **interface_output**
+3. **Category 3 - **interface_output**
     - immersive_display: immersive visual output, e.g., VR headset, AR glasses, Unity Scene
     - gui_display: traditional visual display, e.g., Web UI, Mobile screen
     - haptic_feedback: e.g., Vibration motors, exoskeleton feedback
     - audio_output: e.g., TTS, Sound effects
-5. **infrastructure**
+4. **Category 4 - infrastructure**
     - data_storage: storage unit, e.g., vector DB, Database, Knowledge graph
     - communication: e.g., HTTP Server, WebSocket, Bluetooth
+    - model_lifecycle: model repository/version, training and post-training pipeline, online learning, etc. 
+    - personalization_store: user persona, prefenrence, threshold / calibration parameters, etc
 
 **Output Format for Step 2 and 3**
 {"workflows": [{"flow_id":"...", "flow_type": "MAIN or SUPPORT", "description":"...", "input": "...", "output": "...", "module_seq":[...], "dependencies":[...]}]}
-{"Modules":[{"module_id":"...", "role":"choose the closest match from the taxonomy, e.g., user_entity:target_user", "function_description":"...", "technical_details":"...", "io_spec":"...", "mermaid_def":"...", "subnodes":["subnodes included in the module"], "ports":{...}}]}
+{"Modules":[{"module_id":"...", "role":"choose the closest match from the taxonomy, e.g., sensing_input:bio_sensor", "function_description":"...", "technical_details":"...", "io_spec":"...", "mermaid_def":"...", "subnodes":["subnodes included in the module"], "ports":{...}}]}
 
 **ATTENTION**:
 1. All modules listed in the workflow["module_seq"] should followed the rules of STEP 3 (grouping, labeling and definition) and be listed in the "Modules" section.
 2. The subnodes within the modules should not be listed in the workflow["module_seq"] section, but in the module["subnodes"] section.
+3. Try to select a main label for a functional module. If there are indeed different outputs, split them into two modules for seperate labeling.
 
 ## Step 4: Translate the identified figure into Mermaid code. 
 Use mermaid code to precisely represent the data flow between each layer of the workflow and the nodes. There are two places where the code needs to be returned:
