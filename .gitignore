@@ -22,6 +22,5 @@ node_modules/
 # Project Specific Ignored Files
 case_*/
 clustering_verification_results.json
-community_summary_cache.json
 show_clustering_results.py
-offline_processor/System_Topology_Knowledge.json
+server/kg_cluster/

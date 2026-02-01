@@ -41,7 +41,12 @@ KNN_K = 10
 MIN_SIMILARITY = 0.5  
 MAX_HIERARCHY_LEVELS = 3
 MIN_REDUCTION_RATIO = 0.10  # If communities reduce by less than 10%, stop.
-CACHE_FILE = "community_summary_cache.json"
+
+# Path relative to project root
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+CACHE_DIR = os.path.join(BASE_DIR, "server", "kg_cluster")
+os.makedirs(CACHE_DIR, exist_ok=True)
+CACHE_FILE = os.path.join(CACHE_DIR, "community_summary_cache.json")
 
 class GraphClustering:
     def __init__(self, vector_store, graph_store):

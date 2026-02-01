@@ -5,8 +5,10 @@ from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 from openai import OpenAI
 import uvicorn
-from agents import run_pipeline
+# from agents import run_pipeline # Removed
+from pipeline_runner import run_pipeline # Updated Import
 import sys
+# Add parent directory to path for config import
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import *
 

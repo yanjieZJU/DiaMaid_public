@@ -13,36 +13,39 @@ If there is a figure in the article that represents the core system architecture
    {"arch_exist": the number of the figure (e.g., Figure 1), "caption": the caption of the figure}
 Else: return: {"arch_exist": False}; exit the processing
 
-## Step 2: Figure content comprehension and reconstruct.
-### A. Identify main workflows
-1. **Main Workflow** refers to the complete chain link that directly involves the most core inputs of the system (such as user data, interaction, core business triggers) to the final outpus (such as the information obtained by the user, feedback, physical/virtual actions, etc.)
-   - First, identify all the **Primary Inputs**, usually the inputs from end users, direct users, or the fundamental triggering data of the system's excecution.
-   - Then, identify all the **Final Outputs**, which are the information ultimately returned to the user or produced.
-   - If there are multiple inputs, **determine whether they complement each other or are independent**. For example, if the input includes a user query and an image, but they are inputted into the same module (after basic preprocessing such as converting image and text into the same type, like embedding) and are not distinguished thereafter, they should be considered as complementary inputs. Else, if they lead to different pipelines and different outputs, they should be considered as independent inputs.
-   - If there are multiple outputs, **each should be considered as independent output**.
-2. For each **independent main input(s)-output pair**, clearly define one or more end-to-end paths/processes in the diagram, and sort out the respective nodes (function modules) and edges (data flow). The path should be represented as a sequence of nodes and edges.
-3. If there are multiple main workflows (such as multiple users, tasks, independent channels), they should be separately sorted out.
-4. Labeling rule: **use unique and meaningful identifiers (according to specific functions) instead of numbers. DO NOT use "main_workflow" as the identifier**.
-### B. Identify supporting workflows
-1. **Supporting Workflow** refers to links that do not directly participate in th end-to-end user input-output process, but provide support fot the main workflow, such as training links, data preparation, knowledge management, background management, etc.
-2. **Specific methods**: 
-   - The remaining functional modules that are not on any main process path are considered.
-   - Analyze the dependencies of these modules, such as being the input, reference, parameter, etc. of the main process.
-   - Clarification: The supporting workflows can be independently formed as a workflow, but it should be noted in the description "supporting ... main process's XX node/module".
-   - Each supporting workflow should describe its input and output.
-3. Each supporting workflow should be listed the identifiers in the main workflow["dependencies"] it supported.
+## Step 2: System Architecture Analysis (Mental Step)
+Before extracting modules, thoroughly analyze the system architecture to understand the data flow. This will ensure the correctness of the module connections.
+1. **Identify Main Data Flows**: Trace the path from the core inputs (e.g., user queries, sensors) to the final outputs (e.g., responses, actions).
+2. **Identify Supporting Components**: Identify technical modules that support the main process (e.g., model training, knowledge base construction).
+3. **Trace Connections**: For every connection between components, identify:
+   - What data/signal is being passed?
+   - Where does it originate (which module and specifically which internal node)?
+   - Where does it go (which module and specifically which internal node)?
 
-## Step 3: Module Extraction.
-For each workflow identified in step 2, use nodes (function modules) and edges (data flow) to represent them.
+*Note: You do NOT need to output the list of workflows separately. This step is to ensure your module extraction and port definitions are accurate.*
+
+## Step 3: Module and Data Flow Extraction.
+Extract all functional modules and their connections (ports) based on your analysis.
 ### Rules
-1. Each extracted module should have clear technical/functional independence, facilitating subsequent reuse or replacement.
+1. Each extracted module must correspond to a distinct, explicitly visualized component in the diagram, and should have clear technical/functional independence.
 2. **Definition of nodes and edges**: Nodes are functional modules (sensing_input/processing_core/interface_output/content_generation). Terminals (start and sink) and human entities MUST NOT be nodes. Use interface modules to capture/emit signals. Data stores (e.g., databases, knowledge bases) are modules under infrastructure. All other intermediate artifacts should be stored on the data transmission path ('edge_label') instead of a node.
 3. For all endpoint modules that have no upstream or downstream connections, the missing direction must be explicitly indicated as **"NONE"**.
 4. **Grouping Rule**: If a sequence of steps (A->B->C) is tightly coupled and performs one technical function (e.g., "data cleaning"), group them if necessary, but prefer retaining technical details for implementation clarity. 
 5. **Node Labeling Rule**: The node identifier must reflect the actual function/content of the node (align with the figure) and **AVOID single-character or meaningless names**. Be loyal to the original diagram. Based on the mermaid syntax, replace spaces with underscores, and the node name should not include brackets or other special characters.
-6. **Cross-Reference With Full Text**: Cross-reference the diagram nodes with the paper's Methdology/Implementation sections to obtain detailed descriptions. Include specific algorithms, hardware specs, key parameters, etc. to fill the function and technical details of the module.
-7. Use **concise and clear** language. Omit filler words like "The module utilizes ..." or "In order to ..."
-8. **Port Consistency**: Ensure that the 'ports' definitions are consistent. For any connection A -> B, the 'outgoing' port of module A (target_mod=B) MUST EXACTLY correspond to the 'incoming' port of module B (source_mod=A), including the 'edge_label'.
+6. **Subnodes**: 
+    - Priority 1 (Visual): Extract subnodes that are **explicitly visualized** (nested) in the diagram.
+    - Priority 2 (Textual Structure): If a module is depicted as a "black box" in the diagram, but the text explicitly enumerates its internal components using specific proper nouns (e.g., "The module consists of component A, component B..."), you MUST include them as subnodes.
+    - If they exist, list them in the module["subnodes"] field.
+    - Constraint: Do NOT convert general workflow steps (e.g., "step 1: process data") into subnodes. Only extract static, named architectural components. 
+7. **Cross-Reference With Full Text**: Cross-Reference ONLY the diagram nodes taht have already been identified with the paper's Methodology/Implementation sections to obtain detailed descriptions. This step is strictly for enriching the descriptive details of existing diagram nodes, and **DO NOT create new nodes**. Include specific algorithms, hardware specs, key parameters, etc. to fill the function and technical details of the module. 
+8. Use **concise and clear** language. Omit filler words like "The module utilizes ..." or "In order to ..."
+9. **Port Consistency**: Ensure that the 'ports' definitions are consistent. For any connection A -> B, the 'outgoing' port of module A (target_mod=B) MUST EXACTLY correspond to the 'incoming' port of module B (source_mod=A), including the 'edge_label'.
+   - **Crucial**: The `modules` list acts as the single source of truth for the system topology. The "ports" field in each module must capture ALL data flows.
+10. **Evidence & References**: For every module, specify the source of information in the "evidence" field. 
+    - `source`: 'figure' (if derived primarily from the diagram), or 'figure+text'.
+    - `fig_ref`: The specific figure number (e.g., "Figure 2").
+    - `text_ref`: An array of specific text locations (e.g., "Section 3.2, Paragraph 2").
+    - **CRITICAL**: Do NOT include citations like "(Figure 1)" or "(See Section 3)" in `function_description` or `technical_details`. ALL references must be strictly isolated to the `evidence` field to avoid polluting the content.
 
 ### Role Taxonomy
 **STRICTLY SELECT FROM THE FOLLOWING LIST. DO NOT INVENT NEW ROLES.**
@@ -72,14 +75,12 @@ Return the role in the format: "Category: Role" (e.g., "processing_core: feature
     - model_lifecycle: model repository/version, training and post-training pipeline, online learning, etc. 
     - personalization_store: user persona, prefenrence, threshold / calibration parameters, etc
 
-**Output Format for Step 2 and 3**
-{"workflows": [{"flow_id":"...", "flow_type": "MAIN or SUPPORT", "description":"...", "input": "...", "output": "...", "module_seq":[...], "dependencies":[...]}]}
-{"Modules":[{"module_id":"...", "role":"choose the closest match from the taxonomy, e.g., sensing_input:bio_sensor", "function_description":"...", "technical_details":"...", "io_spec":"...", "mermaid_def":"...", "subnodes":["subnodes included in the module"], "ports":{...}}]}
+
+**Output Format for Step 3**
+{"modules":[{"mod_id":"...", "role":"choose the closest match from the taxonomy, e.g., sensing_input:bio_sensor", "function_description":"...", "technical_details":"...", "io_spec":"...", "mermaid_def":"...", "subnodes":["subnodes included in the module"], "ports":{...}, "evidence": {"source": "...", "fig_ref": "...", "text_ref": [...]}}]}
 
 **ATTENTION**:
-1. All modules listed in the workflow["module_seq"] should followed the rules of STEP 3 (grouping, labeling and definition) and be listed in the "Modules" section.
-2. The subnodes within the modules should not be listed in the workflow["module_seq"] section, but in the module["subnodes"] section.
-3. Try to select a main label for a functional module. If there are indeed different outputs, split them into two modules for seperate labeling.
+1. Try to select a main ROLE for a functional module. If there are indeed different outputs, split them into two modules for seperate labeling.
 
 ## Step 4: Translate the identified figure into Mermaid code. 
 Use mermaid code to precisely represent the data flow between each layer of the workflow and the nodes. There are two places where the code needs to be returned:
@@ -89,6 +90,10 @@ Use mermaid code to precisely represent the data flow between each layer of the 
 1. Strictly follow the grammar of Mermaid, always enclose the labels with double quotation marks.
 2. If different main workflows share some common modules, use the same id and name in the complete code, but need to include them simultaneously in the code of each workflow.
 3. Keep the code simple. No extra information.
+4. **CRITICAL JSON SYNTAX RULE**: When including Mermaid code as a string value in JSON, you **MUST ESCAPE** any double quotes (`"`) used within the Mermaid code labels.
+   - **Incorrect**: `"mermaid_def": "Node["Label"]"` (Breaks JSON)
+   - **Correct**: `"mermaid_def": "Node[\"Label\"]"` (Valid JSON)
+   - Ensure you apply this escaping to ALL double quotes inside the mermaid strings.
 
 ## Overall Requirements
 1. Be loyal to the original article. Output "unknown" if there's no content or explanation regarding this part.

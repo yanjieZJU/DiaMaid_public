@@ -98,9 +98,9 @@ class PlannerAgent:
         # Load Topology Knowledge
         self.topology_knowledge = {}
         try:
-            # Path relative to this file: ../offline_processor/System_Topology_Knowledge.json
-            base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            topo_path = os.path.join(base_dir, "offline_processor", "System_Topology_Knowledge.json")
+            # Path relative to this file: ./kg_cluster/System_Topology_Knowledge.json
+            base_dir = os.path.dirname(os.path.abspath(__file__)) # server dir
+            topo_path = os.path.join(base_dir, "kg_cluster", "System_Topology_Knowledge.json")
             with open(topo_path, "r", encoding="utf-8") as f:
                 self.topology_knowledge = json.load(f)
             print("✅ Loaded System Topology Knowledge.")
@@ -694,7 +694,44 @@ class IntegratorAgent:
             print("Failed to parse JSON response.")
             return None
         return response
-    
+
+    def refine_arch(self, original_query, current_arch, error_report):
+        """
+        Asks the LLM to fix the architecture based on the error report from ConflictSolver.
+        """
+        print(f"🔧 Integrator: Refining architecture based on errors...")
+        prompt = f"""
+        You are a System Architect. You previously generated a system design JSON, but it failed the integrity check.
+        
+        ## User Requirements
+        {original_query}
+
+        ## Current (Flawed) Design
+        {current_arch}
+
+        ## Error Report (Why it is invalid)
+        {error_report}
+
+        ## Task
+        Fix the errors listed in the report. 
+        1. If a node is missing (dangling edge), define it.
+        2. If a node is isolated, connect it or remove it if truly unnecessary.
+        3. Ensuring all 'source_mod' and 'target_mod' in ports refer to valid keys in 'module_details'.
+
+        Return the FULLY CORRECTED JSON object.
+        """
+        try:
+            response = self.client.chat.completions.create(
+                model="gpt-4o",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.1, # Lower temperature for precision fixes
+                response_format={"type": "json_object"},
+            ).choices[0].message.content
+            return response
+        except Exception as e:
+            print(f"Error checking integrity: {e}")
+            return current_arch # Return original if fix fails
+
 class DrawerAgent:
     def __init__(self, client):
         self.client = client
@@ -784,159 +821,169 @@ class DrawerAgent:
 
         return code
             
-def run_pipeline(user_query, num_outputs=1, divergence=True):
-    vector_store, graph_store = load_stores()
-    planner = PlannerAgent(client, graph_store)
-    retriever = RetrieverAgent(vector_store, graph_store, client)
-    integrator = IntegratorAgent(client)
-    drawer = DrawerAgent(client)
-
-    arch_plan = planner.extract_arch(user_query)
-    # print(arch_plan)
-    user_relations = arch_plan["relations"]
+class ConflictSolver:
+    def __init__(self):
+        pass
     
-    results = []
-    structural_hints = retriever.retrieve_structure_paths(user_relations)
-    
-    # Print structural hints once
-    if structural_hints:
-        print(integrator.format_hints(structural_hints))
-
-    # === Pre-calculate Divergent Plans for ALL Options ===
-    # Notice: We generate divergent plans for ALL requested outputs
-    if divergence:
-        divergent_plans = planner.divergent_planning(
-            user_query=user_query,
-            base_anchors=arch_plan["anchors"],
-            num_outputs=num_outputs
-        )
-    else:
-        divergent_plans = None
-
-    # === Step 1: Global Retrieval for Base Anchors (Higher Recall) ===
-    print(f"\n🎯 Retrieving Base Anchors (Top-6 for richer context)...")
-    base_nodes_map = retriever.retrieve_for_module(arch_plan["anchors"], top_k=6, include_topology=False)
-    
-    # Process base nodes into standard format
-    base_ref_info = {}
-    for anchor_name, retrieved_list in base_nodes_map.items():
-        anchor_nodes = []
-        for node_with_score in retrieved_list:
-            if not node_with_score: continue
-            
-            node = node_with_score.node
-            anchor_nodes.append({
-                'id': node.id_,
-                'text': node.text,
-                'score': node_with_score.score,
-                'structural_path': node.metadata.get('topology', None),
-                'metadata': dict(node.metadata)
-            })
-        base_ref_info[anchor_name] = anchor_nodes
-
-    # === Generate Options ===
-    # === Generate Options ===
-    target_iterations = num_outputs if divergence else 1
-    
-    for i in range(target_iterations):
-        
-        current_ref_info = base_ref_info.copy()
-        
-        d_plan = None
-        # Apply Divergent Plan (if available)
-        if divergent_plans and i < len(divergent_plans):
-            d_plan = divergent_plans[i]
-            print(f"\n{'='*60}")
-            print(f"{d_plan}\n")
-        
-        if d_plan:
-            additional_anchors = d_plan.get("additional_anchors", [])
-            perspective = d_plan.get("perspective", "Enhanced")
-            rationale = d_plan.get("rationale", "")
-            
-            print(f"Applying Divergent Perspective: {perspective}")
-            print(f"Rationale: {rationale}")
-            
-            additional_desc = f"**Perspective**: {perspective}\n**Rationale**: {rationale}\n\n"
-            
-            if additional_anchors:
-                # Divergent anchors are new ideas, their topology is valuable context
-                additional_map = retriever.retrieve_for_module(additional_anchors, top_k=3, include_topology=True)
-                for anchor_name, retrieved_list in additional_map.items():
-                    # Note: We append, so if multiple plans use same anchor name, it overwrites. 
-                    # Ideally divergent anchors have unique user_terms.
-                    current_ref_info[anchor_name] = []
-                    for node_with_score in retrieved_list:
-                        node = node_with_score.node
-                        current_ref_info[anchor_name].append({
-                            'id': node.id_,
-                            'text': node.text,
-                            'score': node_with_score.score,
-                            'structural_path': node.metadata.get('topology', None),
-                            'metadata': dict(node.metadata)
-                        })
+    def detect_conflicts(self, arch_json_str):
+        """
+        Inspects the JSON for logical errors and returns a list of issues.
+        Returns: (is_valid: bool, report: str)
+        """
+        try:
+            if isinstance(arch_json_str, str):
+                data = json.loads(arch_json_str)
             else:
-                print(f"No additional anchors suggested for this plan")
-        else:
-            # Fallback / Standard mode
-            additional_anchors = []
-            perspective = "Standard"
-            additional_desc = ""
-            print(f"\n{'='*60}")
-            print(f"Generating Standard Plan (Option {i+1})\n")
-        
-        print(f"\n📦 Retrieved modules summary for Option {i+1}:")
-        print(f"Base Anchors: {len(base_ref_info)} keys")
-        print(f"Total Anchors: {len(current_ref_info)} keys")
-        
-        # Integrate query context
-        full_query = user_query
-        if d_plan:
-             full_query += "; Perspective: "+d_plan.get("perspective", "")+"; Rationale: "+d_plan.get("rationale", "")
+                data = arch_json_str
+        except json.JSONDecodeError:
+            return False, "CRITICAL: Invalid JSON format."
 
-        # Generate architecture using the MERGED retrieved modules
-        new_arch = integrator.integrate_arch(
-            query=full_query, 
-            retrieved_info=current_ref_info, 
-            structural_hints=structural_hints,
-            added_nodes=additional_anchors
-        )
-        
-        if new_arch:
-            mermaid_code = drawer.draw_flowchart(new_arch)
+        module_details = data.get("module_details", {})
+        if not module_details:
+            return False, "CRITICAL: 'module_details' field is missing or empty."
+
+        issues = []
+        valid_mod_ids = set(module_details.keys())
+        connected_modules = set()
+
+        # Check Edges validity
+        for m_id, m_info in module_details.items():
+            ports = m_info.get("ports", {})
             
-            # Add perspective info to description
-            try:
-                arch_json = json.loads(new_arch)
-                module_details = arch_json.get("module_details", {})
-                raw_desc = arch_json.get("overall_description", "")
-            except:
-                module_details = {}
-                raw_desc = ""
+            # Incoming
+            for edge in ports.get("incoming", []):
+                src = edge.get("source_mod")
+                if src not in valid_mod_ids:
+                    issues.append(f"- Invalid Connection: Module '{m_id}' expects input from '{src}', but '{src}' is not defined.")
+                else:
+                    connected_modules.add(m_id)
+                    connected_modules.add(src)
 
-            final_desc = additional_desc + raw_desc
+            # Outgoing
+            for edge in ports.get("outgoing", []):
+                tgt = edge.get("target_mod")
+                if tgt not in valid_mod_ids:
+                    issues.append(f"- Invalid Connection: Module '{m_id}' sends output to '{tgt}', but '{tgt}' is not defined.")
+                else:
+                    connected_modules.add(m_id)
+                    connected_modules.add(tgt)
+
+        # Check for Isolated Nodes (Islands)
+        # We consider a node isolated if it is not in the 'connected_modules' set
+        # But we must be careful: some nodes might be purely internal or implicit start/end? 
+        # Typically every node should have at least one connection unless there's only 1 node total.
+        if len(valid_mod_ids) > 1:
+            for m_id in valid_mod_ids:
+                if m_id not in connected_modules:
+                    issues.append(f"- Isolated Node: Module '{m_id}' has no incoming or outgoing connections to other modules.")
+
+        if not issues:
+            return True, "No conflicts found."
+        
+        return False, "\n".join(issues)
+
+    def resolve(self, arch_json_str):
+        """
+        Parses the architecture JSON, validates topology, fixes broken edges,
+        and removes isolated nodes to ensure a valid graph.
+        """
+        try:
+            if isinstance(arch_json_str, str):
+                data = json.loads(arch_json_str)
+            else:
+                data = arch_json_str
+        except json.JSONDecodeError:
+            print("❌ ConflictSolver: Invalid JSON string.")
+            return arch_json_str
+
+        module_details = data.get("module_details", {})
+        if not module_details:
+            return json.dumps(data)
+
+        print("🕵️ ConflictSolver: Checking topology integrity...")
+        
+        # 1. Collect Valid IDs
+        valid_mod_ids = set(module_details.keys())
+        valid_sub_ids = {} # module_id -> set of subnode names
+        
+        for m_id, m_info in module_details.items():
+            subs = set()
+            if "sub_nodes" in m_info and isinstance(m_info["sub_nodes"], list):
+                for sub in m_info["sub_nodes"]:
+                    if "name" in sub:
+                        subs.add(sub["name"])
+            valid_sub_ids[m_id] = subs
+
+        # 2. Fix Edges (Ports)
+        connected_modules = set()
+        
+        for m_id, m_info in module_details.items():
+            ports = m_info.get("ports", {})
+            new_ports = {
+                "incoming": [],
+                "outgoing": [],
+                "internal_flow": ports.get("internal_flow", [])
+            }
+            
+            # Check Incoming
+            if "incoming" in ports and isinstance(ports["incoming"], list):
+                for edge in ports["incoming"]:
+                    src_mod = edge.get("source_mod")
+                    # Check if source module exists
+                    if src_mod not in valid_mod_ids:
+                        print(f"  Start Refactoring: Removed dead incoming link from '{src_mod}' to '{m_id}' (Source not found)")
+                        continue
+                    
+                    # Connection is valid
+                    new_ports["incoming"].append(edge)
+                    connected_modules.add(m_id)
+                    connected_modules.add(src_mod)
+
+            # Check Outgoing
+            if "outgoing" in ports and isinstance(ports["outgoing"], list):
+                for edge in ports["outgoing"]:
+                    tgt_mod = edge.get("target_mod")
+                    # Check if target module exists
+                    if tgt_mod not in valid_mod_ids:
+                        print(f"  Start Refactoring: Removed dead outgoing link from '{m_id}' to '{tgt_mod}' (Target not found)")
+                        continue
+                        
+                    # Connection is valid
+                    new_ports["outgoing"].append(edge)
+                    connected_modules.add(m_id)
+                    connected_modules.add(tgt_mod)
+            
+            # Update ports
+            m_info["ports"] = new_ports
+
+        # 3. Identify and Remove Isolated Nodes
+        # Re-calculate exact usage
+        referenced_modules = set()
+        for m_id, m_info in module_details.items():
+            ports = m_info.get("ports", {})
+            for e in ports.get("incoming", []):
+                referenced_modules.add(e.get("source_mod"))
+                referenced_modules.add(m_id)
+            for e in ports.get("outgoing", []):
+                referenced_modules.add(e.get("target_mod"))
+                referenced_modules.add(m_id)
+        
+        final_modules = {}
+        cleaned_count = 0
+        
+        for m_id, m_info in module_details.items():
+            if m_id in referenced_modules:
+                final_modules[m_id] = m_info
+            else:
+                print(f"  Start Refactoring: Isolated node '{m_id}' removed.")
+                cleaned_count += 1
                 
-            results.append({
-                "option_id": i + 1,
-                "perspective": perspective,
-                # "based_on_skeleton_score": s.score,
-                "mermaid_code": mermaid_code,
-                "description": final_desc,
-                "node_details": module_details
-            })
-            print(f"\n--- Mermaid Code (Option {i+1}) ---\n{mermaid_code}\n")
+        data["module_details"] = final_modules
+        
+        if cleaned_count > 0:
+            print(f"✅ ConflictSolver: Removed {cleaned_count} isolated modules.")
         else:
-            print(f"❌ Failed to generate architecture for option {i+1}")
+            print(f"✅ ConflictSolver: No isolated modules found.")
 
-    return results
-
-
-if __name__ == "__main__":
-    query = "design a system for coding education towards children"
-    results = run_pipeline(query, num_outputs=1)
-    # vector_store, graph_store = load_stores()
-    # planner = PlannerAgent(client, graph_store)
-    # arch_plan = planner.extract_arch(query)
-    # divergent_plans = planner.divergent_planning(query, arch_plan["anchors"], num_outputs=3)
-    # print(divergent_plans)
+        return json.dumps(data, ensure_ascii=False)
     

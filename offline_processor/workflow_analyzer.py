@@ -12,7 +12,11 @@ import shutil
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import *
 
-OUTPUT_FILE = "System_Topology_Knowledge.json"
+# Define output path
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+OUTPUT_DIR = os.path.join(BASE_DIR, "server", "kg_cluster")
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+OUTPUT_FILE = os.path.join(OUTPUT_DIR, "System_Topology_Knowledge.json")
 
 class TopologyAnalyzer:
     def __init__(self):
@@ -29,52 +33,142 @@ class TopologyAnalyzer:
             api_key=os.environ.get("OPENAI_API_KEY"),
             api_base=os.environ.get("OPENAI_BASE_URL")
         )
-    
+        
+        # Initialize LLM Client for claim generation
+        import httpx
+        from openai import OpenAI
+        http_client = httpx.Client(proxy=None, trust_env=False)
+        self.client = OpenAI(
+            http_client=http_client, 
+            api_key=os.environ.get("OPENAI_API_KEY"), 
+            base_url=os.environ.get("OPENAI_BASE_URL")
+        )
+
     def fetch_workflow_role_sequences(self):
         """
-        Fetches ordered sequences of roles for all workflows.
-        It links Article -> Workflow -> Modules to also get Application Scenario if needed.
+        Fetches ordered sequences of roles by traversing the FLOWS_TO graph for each article.
+        Reconstructs paths from Source Modules -> Sink Modules.
+        Returns: sequences_map where values are lists of (role, function_description).
         """
+        print("Fetching graph topology from Neo4j...")
+        import networkx as nx
+
+        # Query to get all modules and their connections per article
         query = """
-        MATCH (a:LlamaNode {type: 'ARTICLE'})-[:HAS_WORKFLOW]->(w:LlamaNode {type: 'WORKFLOW'})
-        MATCH (w)-[r:EXECUTES_STEP]->(m:LlamaNode {type: 'MODULE'})
+        MATCH (a:LlamaNode {type: 'ARTICLE'})
+        OPTIONAL MATCH (a)-[:DEFINES_MODULE]->(m:LlamaNode {type: 'MODULE'})
+        OPTIONAL MATCH (m)-[:FLOWS_TO]->(next_m:LlamaNode {type: 'MODULE'})
         RETURN 
-            a.name as article_name,
-            w.id as workflow_id,
-            m.role as role,
-            m.community_L0 as community,
-            r.step_index as step_index,
-            a.text as article_text
-        ORDER BY workflow_id, step_index
+            a.id as article_id,
+            a.text as article_text,
+            m.id as m_id,
+            m.role as m_role,
+            m.community_L0 as m_comm,
+            m.function as m_func,
+            next_m.id as next_m_id
         """
         
-        print("Fetching workflow sequences from Neo4j...")
-        sequences = collections.defaultdict(list)
-        wf_community_map = collections.defaultdict(list)
-        wf_text_map = {} # wf_id -> article_text
+        data_by_article = collections.defaultdict(list)
+        node_infos = {} 
+        article_texts = {}
 
         with self.driver.session() as session:
             result = session.run(query)
             for record in result:
-                wf_id = record["workflow_id"]
-                val_role = record["role"]
+                aid = record["article_id"]
+                if not aid: continue
                 
-                if not val_role or val_role == "unknown":
-                    continue
+                # Store article text once
+                if aid not in article_texts:
+                    article_texts[aid] = record["article_text"]
                 
-                sequences[wf_id].append(val_role)
-                
-                comm = record.get("community")
-                if comm:
-                    wf_community_map[wf_id].append(comm)
+                mid = record["m_id"]
+                if mid:
+                    # Store node info
+                    if mid not in node_infos:
+                        node_infos[mid] = {
+                            "role": record["m_role"],
+                            "comm": record["m_comm"],
+                            "func": record.get("m_func", "")
+                        }
                     
-                if wf_id not in wf_text_map:
-                    wf_text_map[wf_id] = record["article_text"]
+                    # Store edge (if next_m exists)
+                    next_mid = record["next_m_id"]
+                    data_by_article[aid].append((mid, next_mid))
 
-        # Filter out short sequences
-        valid_sequences_map = {k: v for k, v in sequences.items() if len(v) >= 2}
-        print(f"Found {len(valid_sequences_map)} valid workflow sequences (length >= 2).")
-        return valid_sequences_map, wf_text_map, wf_community_map
+        sequences_map = {}
+        path_text_map = {}
+        path_comm_map = collections.defaultdict(list)
+
+        print(f"Processing topology for {len(data_by_article)} articles...")
+
+        for aid, edges in data_by_article.items():
+            G = nx.DiGraph()
+            
+            # Build graph for this article
+            for src, tgt in edges:
+                G.add_node(src)
+                if tgt:
+                    G.add_edge(src, tgt)
+            
+            if len(G.nodes) < 2: 
+                continue
+            
+            # Identify Sources and Sinks
+            sources = [n for n in G.nodes if G.in_degree(n) == 0]
+            sinks = [n for n in G.nodes if G.out_degree(n) == 0]
+            
+            # If graph is fully cyclic or weird, fallback to all nodes?
+            # Heuristic: If no sources, pick node withMin in-degree
+            if not sources:
+                 # Skip cyclic components for now to avoid infinite loops or complexity
+                 continue 
+
+            paths = []
+            MAX_PATHS = 20 # Limit paths per article to avoid explosion
+            
+            for s in sources:
+                for t in sinks:
+                    if s == t: continue
+                    try:
+                        # Find all simple paths with length limit
+                        # We use a cutoff to prevent extremely long looping paths
+                        found_paths = list(nx.all_simple_paths(G, source=s, target=t, cutoff=12))
+                        paths.extend(found_paths)
+                        if len(paths) > MAX_PATHS: break
+                    except:
+                         pass
+                if len(paths) > MAX_PATHS: break
+            
+            # Deduplicate and Store
+            unique_paths = set(tuple(p) for p in paths)
+            
+            for idx, p_tuple in enumerate(unique_paths):
+                # Convert Node IDs to Roles + Functions
+                role_func_seq = []
+                comm_seq = []
+                
+                valid = True
+                for nid in p_tuple:
+                    r = node_infos[nid].get("role")
+                    c = node_infos[nid].get("comm")
+                    f = node_infos[nid].get("func")
+                    
+                    if not r or r == "unknown": 
+                        pass
+                    
+                    # Store (role, function) tuple
+                    role_func_seq.append((r, f))
+                    if c: comm_seq.append(c)
+                
+                if len(role_func_seq) >= 2:
+                    path_id = f"{aid}_p{idx}"
+                    sequences_map[path_id] = role_func_seq
+                    path_text_map[path_id] = article_texts[aid]
+                    path_comm_map[path_id] = comm_seq
+
+        print(f"Found {len(sequences_map)} valid topological paths (length >= 2).")
+        return sequences_map, path_text_map, path_comm_map
 
     def extract_scenario(self, text):
         if not text: return ""
@@ -168,40 +262,109 @@ class TopologyAnalyzer:
             
         return clusters, cluster_descriptions
 
-    def analyze_transitions(self, sequences):
+    def generate_claims(self, source_role, target_role, context_pairs):
+        """
+        Generates a semantic 'claim' or rationale for why a transition exists, 
+        using specific function descriptions from the modules.
+        """
+        # Summarize context to avoid token overflow. Take up to 5 examples.
+        examples_text = ""
+        unique_pairs = list(set(context_pairs))[:5]
+        for idx, (s_func, t_func) in enumerate(unique_pairs):
+            if s_func and t_func:
+                examples_text += f"   Example {idx+1}:\n     Source ({source_role}): {s_func}\n     Target ({target_role}): {t_func}\n"
+        
+        prompt = f"""
+        Analyze the functional transition between two roles in an AI system architecture.
+        
+        Transition: [{source_role}] -> [{target_role}]
+        
+        Context (Specific Module Functions observed in this transition):
+        {examples_text}
+        
+        Task: Synthesize a general technical claim explaining what this transition achieves in this type of system.
+        Explain the "why" and "how" based on the examples.
+        Start with a verb like "Enables...", "Facilitates...", "Transforms...", "Validates...".
+        Keep it concise (1 sentence).
+        """
+        try:
+            response = self.client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.3,
+                max_tokens=80
+            )
+            return response.choices[0].message.content.strip()
+        except Exception as e:
+            print(f"Warning: Failed to generate claim for {source_role}->{target_role}: {e}")
+            return ""
+
+    def analyze_transitions(self, sequences, enrich_with_llm=False, probability_threshold=0.35):
         """
         Analyzes 1-step transitions: Role A -> Role B
+        Sequences are now lists of (role, function) tuples.
         Returns a nested dict: { RoleA: { next_likely_steps: [ ... ] } }
+        If enrich_with_llm is True, generates a 'claim' for transitions with prob > threshold.
         """
-        transitions = collections.defaultdict(collections.Counter)
+        # transitions[source_role][target_role] = list of (source_func, target_func)
+        transitions = collections.defaultdict(lambda: collections.defaultdict(list))
         
         for seq in sequences:
             for i in range(len(seq) - 1):
                 try:
-                    curr = seq[i]
-                    next_node = seq[i+1]
-                    transitions[curr][next_node] += 1
+                    # unpack role and function
+                    curr_role, curr_func = seq[i]
+                    next_role, next_func = seq[i+1]
+                    
+                    if curr_role and next_role:
+                        transitions[curr_role][next_role].append((curr_func, next_func))
                 except:
                     continue
         
         # Convert to probability format
         topology_knowledge = {}
         
-        for current_role, follower_counts in transitions.items():
-            total = sum(follower_counts.values())
+        # Cache claims not just by pair, but maybe we shouldn't cache globally if context differs?
+        # Actually, for "Global Analysis", context is global. For "Cluster Analysis", context is cluster-specific.
+        # So caching within this function call is fine.
+        claim_cache = {} 
+        
+        print(f"Analyzing transitions (Total source roles: {len(transitions)})...")
+        
+        for current_role, follower_data in transitions.items():
+            # Calculate total transitions from current_role
+            total = sum(len(pairs) for pairs in follower_data.values())
             next_steps = []
             
-            for next_role, count in follower_counts.most_common():
-                next_steps.append({
+            # Sort by count descending
+            sorted_next = sorted(follower_data.items(), key=lambda x: len(x[1]), reverse=True)
+            
+            for next_role, context_pairs in sorted_next:
+                count = len(context_pairs)
+                prob = round(count / total, 3)
+                
+                step_info = {
                     "role": next_role,
-                    "prob": round(count / total, 3),
+                    "prob": prob,
                     "count": count
-                })
+                }
+                
+                # Check for claim generation
+                if enrich_with_llm and prob >= probability_threshold:
+                    pair_key = f"{current_role}->{next_role}"
+                    
+                    # We generate claim fresh for this call (context specific to this cluster/global set)
+                    # But if we have duplicates in the same run loop (unlikely since keys are unique), cache helps.
+                    if pair_key not in claim_cache:
+                        print(f"  generating claim for high-prob flow: {pair_key} (prob={prob})")
+                        claim_cache[pair_key] = self.generate_claims(current_role, next_role, context_pairs)
+                    
+                    step_info["claim"] = claim_cache[pair_key]
+                
+                next_steps.append(step_info)
             
             topology_knowledge[current_role] = {
-                "next_likely_steps": next_steps,
-                # Description could be enriched by LLM later, plain for now
-                "description": f"Observed {total} transitions from this role." 
+                "next_likely_steps": next_steps
             }
             
         return topology_knowledge
@@ -209,19 +372,24 @@ class TopologyAnalyzer:
     def analyze_subsequences(self, sequences, length=3):
         """
         Finds common subsequences of a given length.
+        Sequences are lists of (role, function). We extracting only roles for pattern mining.
         """
         subseq_counter = collections.Counter()
         
         for seq in sequences:
             if len(seq) < length:
                 continue
-            for i in range(len(seq) - length + 1):
-                sub = tuple(seq[i : i+length])
+            
+            # Extract roles only
+            role_seq = [item[0] for item in seq]
+            
+            for i in range(len(role_seq) - length + 1):
+                sub = tuple(role_seq[i : i+length])
                 subseq_counter[sub] += 1
                 
         # Format
         results = []
-        for seq_tuple, count in subseq_counter.most_common(20):
+        for seq_tuple, count in subseq_counter.most_common(10):
             results.append({
                 "sequence": list(seq_tuple),
                 "count": count
@@ -253,7 +421,8 @@ class TopologyAnalyzer:
         
         # 1. Global Analysis
         print("Running Global Analysis...")
-        global_transitions = self.analyze_transitions(all_sequences)
+        # Enable LLM enrichment for global stats
+        global_transitions = self.analyze_transitions(all_sequences, enrich_with_llm=False)
         global_patterns_3 = self.analyze_subsequences(all_sequences, 3)
         global_patterns_4 = self.analyze_subsequences(all_sequences, 4)
         
@@ -264,11 +433,12 @@ class TopologyAnalyzer:
         cluster_insights = {}
         for label, wf_ids in wf_clusters.items():
             # Get valid sequences for this cluster
+            # Get valid sequences for this cluster
             cluster_seqs = [sequences_map[wid] for wid in wf_ids if wid in sequences_map]
             
             if not cluster_seqs: continue
             
-            c_trans = self.analyze_transitions(cluster_seqs)
+            c_trans = self.analyze_transitions(cluster_seqs, enrich_with_llm=True)
             c_patt3 = self.analyze_subsequences(cluster_seqs, 3)
             c_comm_dist = self.calculate_community_distribution(wf_ids, wf_community_map)
             
@@ -296,11 +466,10 @@ class TopologyAnalyzer:
         }
         
         # 4. Save
-        local_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), OUTPUT_FILE)
-        with open(local_path, 'w', encoding='utf-8') as f:
+        with open(OUTPUT_FILE, 'w', encoding='utf-8') as f:
             json.dump(knowledge_base, f, indent=2, ensure_ascii=False)
             
-        print(f"✅ System Topology Knowledge (Clustered) saved to {local_path}")
+        print(f"✅ System Topology Knowledge (Clustered) saved to {OUTPUT_FILE}")
 
         self.driver.close()
 

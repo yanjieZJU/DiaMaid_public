@@ -40,10 +40,10 @@ def main():
     print("🤖 Starting Knowledge Base Initialization Pipeline...")
     total_start = time.time()
 
-    # Step 1: PDF Processing (Extract Structure)
-    # Extracts text/JSON from new PDFs in ./case_llm_artifact
-    if not run_step("pdfReader.py", "PDF Parsing & Extraction"):
-        sys.exit(1)
+    # # Step 1: PDF Processing (Extract Structure)
+    # # Extracts text/JSON from new PDFs in ./case_llm_artifact
+    # if not run_step("pdfReader.py", "PDF Parsing & Extraction"):
+    #     sys.exit(1)
 
     # Step 2: Graph Construction (JSON -> Neo4j)
     # Clears Neo4j and rebuilds the graph + Basic Vector Store

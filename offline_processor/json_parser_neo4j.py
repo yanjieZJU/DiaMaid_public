@@ -21,11 +21,10 @@ DATA_DIR = "./case_llm_artifact/json_files"
 STORAGE_DIR = "./server/graph_storage" 
 
 VALID_ROLES_MAP = {
-    "user_entity": ["target_user", "stakeholder"],
-    "sensing_input": ["bio_sensor", "behavior_sensor", "env_sensor", "direct_input"],
+    "sensing_input": ["bio_sensor", "behavior_sensor", "env_sensor", "direct_input", "system_context", "data_import"],
     "processing_core": ["signal_optimization", "feature_extraction", "state_assessment", "decision_logic", "content_generation"],
     "interface_output": ["immersive_display", "gui_display", "haptic_feedback", "audio_output"],
-    "infrastructure": ["data_storage", "communication"]
+    "infrastructure": ["data_storage", "communication", "model_lifecycle", "personalization_store"]
 }
 
 ROLE_TO_CATEGORY = {}
@@ -135,7 +134,6 @@ def parse_json_to_graph_elements(json_path):
     relations = []
     
     article_info = data.get('basic_information', {}) or data.get('article_information', {}) 
-    workflows = data.get('workflows', [])
     modules = data.get('modules', [])
     full_code = data.get('full_code', '')
 
@@ -172,7 +170,7 @@ def parse_json_to_graph_elements(json_path):
 
     # 创建映射字典 - 使用 mod_id 和 flow_id 作为键
     module_id_to_node_id = {}
-    flow_id_to_node_id = {}
+
     
     # 跟踪本文件内创建的角色节点，避免重复
     created_role_nodes = {}
@@ -327,78 +325,7 @@ def parse_json_to_graph_elements(json_path):
                         label="HAS_ROLE"
                     ))
 
-    # --- 3. 创建 Workflow 节点 ---
-    for wf_data in workflows:
-        flow_id = wf_data.get("flow_id")
-        if not flow_id:
-            continue  # 如果没有flow_id，跳过这个工作流
-            
-        wf_uid = f"WF_{flow_id}_{uuid.uuid4().hex[:6]}"
-        flow_id_to_node_id[flow_id] = wf_uid
 
-        wf_text = (
-            f"Workflow: {flow_id}\n"
-            f"Description: {wf_data.get('description', '')}\n"
-            f"Input: {wf_data.get('input', '')}\n"
-            f"Output: {wf_data.get('output', '')}"
-        )
-
-        wf_metadata = {
-            "name": flow_id,
-            "type": "WORKFLOW",
-            "source": file_name,
-            "flow_type": wf_data.get('flow_type', '')
-        }
-        
-        wf_node = TextNode(
-            text=wf_text, 
-            id_=wf_uid, 
-            metadata=wf_metadata 
-        )
-        nodes.append(wf_node)
-
-        relations.append(Relation(
-            source_id=article_id,
-            target_id=wf_uid,
-            label="HAS_WORKFLOW"
-        ))
-
-    for wf_data in workflows:
-        flow_id = wf_data.get("flow_id")
-
-        wf_uid = flow_id_to_node_id.get(flow_id)
-        if not wf_uid:
-            continue  
-        
-        # workflow --> workflow (dependencies)
-        dependencies = wf_data.get("dependencies", [])
-        for dep_flow_id in dependencies:
-            target_wf_node_id = flow_id_to_node_id.get(dep_flow_id)
-            if target_wf_node_id:
-                relations.append(Relation(
-                    source_id=wf_uid,
-                    target_id=target_wf_node_id,
-                    label="DEPENDS_ON"
-                ))
-            else:
-                print(f"⚠️  Workflow {flow_id} references missing workflow with flow_id: {dep_flow_id}")
-    
-
-        # workflow --> module (module sequence)
-        seq = wf_data.get("module_seq", [])
-        for index, mod_id_ref in enumerate(seq):
-            target_mod_node_id = module_id_to_node_id.get(mod_id_ref)
-            if target_mod_node_id:
-                relations.append(Relation(
-                    source_id=wf_uid,
-                    target_id=target_mod_node_id,
-                    label="EXECUTES_STEP",
-                    properties={"step_index": index, "step_name_in_flow": mod_id_ref}
-                ))
-            else:
-                print(f"⚠️  Workflow {flow_id} references missing module: {mod_id_ref}")
-        
-    # --- 4. 创建 Module 之间的 FLOWS_TO 关系 ---
     for mod_data in modules:
         mod_id = mod_data.get('mod_id')
         if not mod_id:
@@ -574,7 +501,7 @@ def build_graph_index():
     print("Initializing storage context...")
     storage_context = initialize_storage()
     graph_store = storage_context.property_graph_store
-    embed_model = OpenAIEmbedding(model_name="text-embedding-3-small")
+    embed_model = OpenAIEmbedding(model_name="text-embedding-3-small", api_key=os.getenv("OPENAI_API_KEY"), api_base=os.getenv("OPENAI_BASE_URL"))
 
     clear_neo4j_database(graph_store)
     
