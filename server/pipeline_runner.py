@@ -132,7 +132,7 @@ def run_pipeline(user_query, num_outputs=1, divergence=True):
             query=full_query, 
             retrieved_info=current_ref_info, 
             structural_hints=structural_hints,
-            added_nodes=additional_anchors
+            divergent_plan=d_plan
         )
         
         # === SELF-CORRECTION LOOP ===
@@ -165,9 +165,17 @@ def run_pipeline(user_query, num_outputs=1, divergence=True):
                 arch_json = json.loads(validated_arch_json_str)
                 module_details = arch_json.get("module_details", {})
                 raw_desc = arch_json.get("overall_description", "")
+                
+                # Collect References
+                ref_data = integrator.collect_references(arch_json, current_ref_info)
+                used_ref = ref_data.get("used", {})
+                explorable_ref = ref_data.get("explorable", [])
+                
             except:
                 module_details = {}
                 raw_desc = ""
+                used_ref = {}
+                explorable_ref = []
 
             final_desc = additional_desc + raw_desc
                 
@@ -176,7 +184,9 @@ def run_pipeline(user_query, num_outputs=1, divergence=True):
                 "perspective": perspective,
                 "mermaid_code": mermaid_code,
                 "description": final_desc,
-                "node_details": module_details
+                "node_details": module_details,
+                "used_references": used_ref,
+                "explorable_references": explorable_ref
             })
             print(f"\n--- Mermaid Code (Option {i+1}) ---\n{mermaid_code}\n")
         else:

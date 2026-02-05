@@ -25,29 +25,25 @@ client = OpenAI(
     )
 
 TAXONOMY = """
-1. **user_entity**
-    - primary_user: the user who is the final user of the system
-    - secondary_user: stakeholder, observer or assistant, e.g., instructor, researcher
-    - agents: non-human agents that can running independently (outside the system), e.g., robots, collaborative AI
-2. **sensing_input**
+1. **sensing_input**
     - bio_sensor: internal human physiological signals, e.g., EEG, EMG, ECG
     - behavior_sensor: external human behaviors/movements. e.g., IMU, eye tracker, motion capture
     - env_sensor: environment perception, e.g., RGB Camera, temperature sensor
     - direct_input: direct human-computer interaction input based on interfaces, e.g., Keyboard, Mouse, Touchscreen
     - system_context: equipment, system status and application log, etc.
     - data_import: offline documents, knowledge base, third-party API stream that serve as inputs
-3. **processing_core**
+2. **processing_core**
     - signal_optimization: making the signal cleaner without changing the data type, e.g., filter, normalizer
     - feature_extraction: convert raw high-dimensional data (images, audio streams) into structured features or symbolic representations, e.g., gaze tracker, pose estimator, speech-to-text
     - state_assessment: qualitative or quantitative evaluation of the extracted features (judge how good/bad/intense something is), e.g., emotion recognition, fatigue detection
     - decision_logic: determine the next step based on the state assessment, e.g., recommender logic, dialog manager (even if it uses an LLM, if the output is a control flag or strategy, it belongs here)
     - content_generation: e.g., text generation (llm, chatbot), image generation (diffusion model)
-4. **interface_output**
+3. **interface_output**
     - immersive_display: immersive visual output, e.g., VR headset, AR glasses, Unity Scene
     - gui_display: traditional visual display, e.g., Web UI, Mobile screen
     - haptic_feedback: e.g., Vibration motors, exoskeleton feedback
     - audio_output: e.g., TTS, Sound effects
-5. **infrastructure**
+4. **infrastructure**
     - data_storage: storage unit, e.g., vector DB, Database, Knowledge graph
     - communication: e.g., HTTP Server, WebSocket, Bluetooth
     - model_lifecycle: model repository/version, training and post-training pipeline, online learning, etc. 
@@ -162,7 +158,7 @@ class PlannerAgent:
             response = self.client.chat.completions.create(
                 model="gpt-4o",
                 messages=[{"role": "user", "content": prompt}],
-                temperature=0.2,
+                temperature=0,
                 response_format={"type": "json_object"},
             ).choices[0].message.content
             print(f"LLM Response: {str(response)}")
@@ -176,6 +172,7 @@ class PlannerAgent:
             print("Failed to parse JSON response.")
             return None
         
+
     def divergent_planning(self, user_query, base_anchors, num_outputs=2):
         """
         Generates divergent extension plans based on the user query and already extracted base anchors.
@@ -220,13 +217,23 @@ class PlannerAgent:
         if scored_clusters:
             near_cluster_id = scored_clusters[0][0]
             near_score = scored_clusters[0][1]
-            selected_references.append({
-                "type": "NEAR_FIELD",
-                "cluster_id": near_cluster_id,
-                "score": near_score,
-                "name": self.topology_knowledge["scene_clusters"][near_cluster_id]["name"]
-            })
-            print(f"🎯 Near-Field Context: {self.topology_knowledge['scene_clusters'][near_cluster_id]['name'][:50]}... (Score: {near_score:.2f})")
+            
+            if near_score < 0.5:
+                selected_references.append({
+                    "type": "NEAR_FIELD_MISSING",
+                    "cluster_id": None,
+                    "score": near_score,
+                    "name": "No Relevant Papers Found"
+                })
+                print(f"⚠️ Near-Field Context Score low ({near_score:.2f} < 0.5). Marked as missing.")
+            else:
+                selected_references.append({
+                    "type": "NEAR_FIELD",
+                    "cluster_id": near_cluster_id,
+                    "score": near_score,
+                    "name": self.topology_knowledge["scene_clusters"][near_cluster_id]["name"]
+                })
+                print(f"🎯 Near-Field Context: {self.topology_knowledge['scene_clusters'][near_cluster_id]['name'][:50]}... (Score: {near_score:.2f})")
 
         # B. Far Field (Random Sampling)
         near_id_set = {scored_clusters[0][0]} if scored_clusters else set()
@@ -252,7 +259,7 @@ class PlannerAgent:
         while len(selected_references) < num_outputs:
              # Just pick next best near ones or randoms
              # for simplicity, just pick from top list excluding already picked
-             existing_ids = set(r["cluster_id"] for r in selected_references)
+             existing_ids = set(r["cluster_id"] for r in selected_references if r["cluster_id"] is not None)
              residue = [c for c in scored_clusters if c[0] not in existing_ids]
              if not residue: break
              c_id, c_score = residue[0]
@@ -261,7 +268,7 @@ class PlannerAgent:
                 "cluster_id": c_id,
                 "score": c_score,
                 "name": self.topology_knowledge["scene_clusters"][c_id]["name"]
-             })
+            })
         
         # 3. Retrieve Capabilities for specific references
         # We want to give the LLM specific "Reference Packs"
@@ -269,7 +276,18 @@ class PlannerAgent:
         reference_context_str = ""
         
         for idx, ref in enumerate(selected_references):
+            if ref["type"] == "NEAR_FIELD_MISSING":
+                ref_block = f"""
+            ### Source {idx + 1} (Near-Field):
+            Condition: Similarity score {ref['score']:.2f} < 0.5.
+            Message: No papers highly relevant to this system were retrieved.
+            """
+                reference_context_str += ref_block
+                continue
+                
             c_id = ref["cluster_id"]
+            if c_id is None: continue # Should not happen unless logic error
+
             cluster_data = self.topology_knowledge["scene_clusters"][c_id]
             
             # Get top N communities for this cluster
@@ -290,10 +308,28 @@ class PlannerAgent:
                     for record in result:
                         comm_summaries_text.append(f"- [Community {record['id']}]: {record['summary']}")
             
+            # Extract Common Patterns with Claims
+            patterns_text = [] 
+            for p_key in ["common_patterns_3", "common_patterns_4"]:
+                patterns = cluster_data.get(p_key, [])
+                # Take top 3 sorted by count
+                patterns.sort(key=lambda x: x.get("count", 0), reverse=True)
+                for pat in patterns[:3]:
+                    seq = pat.get("sequence", [])
+                    claim = pat.get("claim", "")
+                    if seq and claim:
+                        seq_str = " -> ".join(seq)
+                        patterns_text.append(f"- Pattern: [{seq_str}]\n  * Insight: {claim}")
+            
+            patterns_section = ""
+            if patterns_text:
+                patterns_section = "\n**Common Workflow Patterns & Insights:**\n" + "\n".join(patterns_text)
+
             ref_block = f"""
             ### Source {idx + 1} ({ref['type']} - Dist: {1-ref['score']:.2f}): {cluster_data['name']}
             **Key Functional Communities in this domain:**
             {chr(10).join(comm_summaries_text)}
+            {patterns_section}
             """
             reference_context_str += ref_block
 
@@ -317,6 +353,7 @@ class PlannerAgent:
         
         **Plan 1 (Deep Optimization)**:
         - Use **Source 1** (Near-Field) as your inspiration.
+        - If Source 1 states "No papers highly relevant", explicitly mention "No papers highly relevant to this system were retrieved" in your rationale, and rely on general HCI knowledge to professionalize the system.
         - Look for professional details or standard modules in this domain that are missing from the Base Anchors.
         - Refine the system to be more professional and complete.
         
@@ -350,7 +387,7 @@ class PlannerAgent:
                             "user_term": "Specific Module Name",
                             "description": "Functional description",
                             "role": "category: subcategory",
-                            "community_id": "ID from Source text"
+                            "community_id": "ID from Source text, use NONE if no match"
                         }}
                     ]
                 }},
@@ -541,7 +578,7 @@ class IntegratorAgent:
         hints_text += "\n"
         return hints_text
     
-    def integrate_arch(self, query, retrieved_info, structural_hints=[], added_nodes=[]):
+    def integrate_arch(self, query, retrieved_info, structural_hints=[], divergent_plan=None):
         """
         Integrates all information to generate the final system architecture.
 
@@ -549,7 +586,7 @@ class IntegratorAgent:
             query (str): The user query.
             retrieved_info (dict): Retrieved specific module information.
             structural_hints (list): Structural paths found between components.
-            added_nodes (list): New nodes introduced by the divergent planner.
+            divergent_plan (dict): The structured plan from divergent_planning (optional).
 
         Returns:
             dict: The final integrated architecture plan.
@@ -557,15 +594,42 @@ class IntegratorAgent:
 
         hints_text = self.format_hints(structural_hints)
 
-        added_nodes_text = ""
-        if added_nodes:
-            added_nodes_text = "\n\n".join([f"{node['user_term']} ({node['description']})" for node in added_nodes])
-
-        # Slim down retrieved_info to reduce noise and token usage
-        # Identify added anchor keys for special handling
+        # Process Divergent Plan Info
+        extension_context = ""
         added_keys = set()
-        if added_nodes:
-            added_keys = {n['user_term'] for n in added_nodes}
+        
+        if divergent_plan:
+            perspective = divergent_plan.get("perspective", "Standard")
+            rationale = divergent_plan.get("rationale", "")
+            added_nodes = divergent_plan.get("additional_anchors", [])
+            
+            if added_nodes:
+                added_keys = {n['user_term'] for n in added_nodes}
+                
+                # Format extension modules significantly for the prompt
+                modules_list_str = "\n".join([f"- {n['user_term']}: {n['description']}" for n in added_nodes])
+                
+                extension_context = f"""
+                ## Divergent Extensions (New Sub-systems to Integrate)
+                We have identified a valid extension plan to enhance the system. You must integrate these new modules into the Main Pipeline responsibly.
+                
+                **Plan Perspective**: "{perspective}"
+                **Rationale**: {rationale}
+                
+                **Extension Modules**:
+                {modules_list_str}
+                
+                **Integration Strategy**:
+                1. **Sub-System Mounting**: Treat these modules as a coherent "plugin" or "feature branch".
+                - They often form a SUB-LOOP (e.g., feedback loop) or a PARALLEL BRANCH (e.g., multi-modal input).
+                - Do NOT scatter them randomly. Keep them logically connected to specific "Hook Points" in the main flow (e.g., attach a new 'Stress Analyzer' to the main 'Decision Logic').
+                
+                2. **Conflict Handling**:
+                - If an Extension Module conflicts with a User Module (e.g., "Standard Camera" vs. "Specialized Eye-Tracker"), **Prioritize the User's explicit choice**, but consider using the Extension Module as an *alternative input* or *enhancement*.
+                """
+        else:
+             # Fallback if old call signature is used or no plan
+             extension_context = "No specific divergent extensions provided."
 
         slim_retrieved_info = {}
         for anchor, nodes in retrieved_info.items():
@@ -612,7 +676,8 @@ class IntegratorAgent:
             - If the paths suggest the need for an intermediate node (e.g., Sensor -> [Buffer] -> LLM), then such a node should be added.
 
         ## Data Sources
-        Added Nodes by Divergent Planner: ```{added_nodes_text}```\n\n
+        {extension_context}
+
         Retrieved Modules: ```{json.dumps(slim_retrieved_info, ensure_ascii=False, indent=2)}```\n\n
         Structural Paths: ```{hints_text}```\n\n
         
@@ -641,37 +706,37 @@ class IntegratorAgent:
                     "function": "the functions of this module",
                     "technical_methods": "the technical methods used in this module",
                     "role": "choose from ["input", "output", "processing", "data"]",
-                    "references": "the code of the referenced module (if any). Use 'None' if not available.",
-                    "sub_nodes":[
+                    "references": "Exact names of the sourced modules from Retrieved Information, comma-separated. Use 'None' if not available.",
+                    "sub_nodes": [
                         {{
-                            "name": "the sub node name (if any)",
-                            "function": "the functions of this sub node (if any)",
-                            "technical_methods": "the technical methods used in this sub node (if any)",
+                            "name": "name of the subnode",
+                            "function": "function of the subnode",
+                            "technical_methods": "technical methods used"
                         }}
                     ],
                     "ports": {{
-                        "incoming (if any)": [
+                        "incoming": [
                             {{
-                                "source_mod": "the identifier of the incoming module",
-                                "source_node": "the identifier of the incoming node. If the source module has subnodes, use the subnode identifier that the incoming edge connects to. Else, use `None` means the data flow from the module.",
-                                "connects_to_internal_node": "the identifier of the internal subnode that the incoming edge connects to. If the incoming edge connects to the module, use `None`.",
-                                "edge_label": "the label of the incoming edge, i.e., the meaning of the data flow",
+                                "source_mod": "id of the source module",
+                                "source_node": "id of the source subnode (if applicable, else null)",
+                                "connects_to_internal_node": "id of the internal subnode (if applicable, else null)",
+                                "edge_label": "description of data/control flow"
                             }}
                         ],
-                        "outgoing (if any)": [
-                            {{
-                                "target_mod": "the identifier of the outgoing module",
-                                "target_node": "the identifier of the outgoing node. If the target module has subnodes, use the subnode identifier that the outgoing edge connects to. Else, use `None` means the data flow to the module.",
-                                "originates_from_internal_node": "the identifier of the internal subnode that the outgoing edge originates from. If the outgoing edge originates from the module, use `None`.",
-                                "edge_label": "the label of the outgoing edge, i.e., the meaning of the data flow",
+                        "outgoing": [
+                             {{
+                                "target_mod": "id of the target module",
+                                "target_node": "id of the target subnode (if applicable, else null)",
+                                "originates_from_internal_node": "id of the internal subnode (if applicable, else null)",
+                                "edge_label": "description of data/control flow"
                             }}
                         ],
-                        "internal_flow (if any that happens within the module, from one subnode to another)": [
-                            {{
-                                "from": "the identifier of the subnode",
-                                "to": "the identifier of the subnode",
-                                "edge_label": "the label of the internal edge, i.e., the meaning of the data flow",
-                            }}
+                        "internal_flow": [
+                           {{
+                                "source_node": "id of the internal source subnode",
+                                "target_node": "id of the internal target subnode",
+                                "edge_label": "description of data/control flow"
+                           }}
                         ]
                     }}
                 }}
@@ -730,7 +795,79 @@ class IntegratorAgent:
             return response
         except Exception as e:
             print(f"Error checking integrity: {e}")
-            return current_arch # Return original if fix fails
+            return current_arch
+
+    def collect_references(self, arch_plan, retrieved_info):
+        """
+        Organize used references and unused 'explorable' references from retrieved info.
+        Args:
+            arch_plan (dict): The final architecture plan (JSON).
+            retrieved_info (dict): The raw retrieval dictionary {anchor: [nodes]}.
+        Returns: 
+            dict: { "used": { "Module": [evidence] }, "explorable": [evidence] }
+        """
+        if not arch_plan or "module_details" not in arch_plan:
+             return {"used": {}, "explorable": []}
+
+        # 1. Extract Used Reference Names from Plan
+        # Map: RefName -> ModuleUserTerm
+        used_ref_map = {} 
+        
+        module_details = arch_plan["module_details"]
+        vals = module_details.values() if isinstance(module_details, dict) else module_details
+        
+        for mod in vals:
+            m_name = mod.get("name", "Unknown")
+            ref_str = mod.get("references", "")
+            if ref_str and ref_str.lower() != "none":
+                # Split by comma
+                refs = [r.strip() for r in ref_str.split(",")]
+                for r in refs:
+                    if r: used_ref_map[r.lower()] = m_name
+
+        # 2. Iterate Retrieved Info
+        used_output = {}
+        explorable_output = []
+        
+        seen_ids = set() 
+
+        for anchor, nodes in retrieved_info.items():
+            for node_data in nodes:
+                n_id = node_data.get('id', 'unknown')
+                if n_id in seen_ids: continue
+                seen_ids.add(n_id)
+                
+                n_name = node_data.get('metadata', {}).get('name', '')
+                if not n_name and 'node' in node_data:
+                     n_name = node_data['node'].metadata.get('name', '')
+                     
+                n_text = node_data.get('text', '')
+                if not n_text and 'node' in node_data:
+                    n_text = node_data['node'].text
+                
+                if not n_name: n_name = "Unknown Source"
+
+                # Check if this node is in used_ref_map
+                matched_module = None
+                for ref_key, mod_term in used_ref_map.items():
+                    if ref_key in n_name.lower() or n_name.lower() in ref_key:
+                        matched_module = mod_term
+                        break
+                
+                entry = {
+                    "name": n_name,
+                    "text": n_text,
+                    "source_anchor": anchor
+                }
+                
+                if matched_module:
+                    if matched_module not in used_output:
+                        used_output[matched_module] = []
+                    used_output[matched_module].append(entry)
+                else:
+                    explorable_output.append(entry)
+                    
+        return {"used": used_output, "explorable": explorable_output}
 
 class DrawerAgent:
     def __init__(self, client):
@@ -781,7 +918,7 @@ class DrawerAgent:
             response = self.client.chat.completions.create(
                 model="qwen3-vl-plus",
                 messages=[{"role": "user", "content": prompt}],
-                temperature=0.7,
+                temperature=0,
                 response_format={"type": "json_object"},
             ).choices[0].message.content
             raw_code = json.loads(response)["mermaid_code"]
@@ -842,6 +979,15 @@ class ConflictSolver:
         if not module_details:
             return False, "CRITICAL: 'module_details' field is missing or empty."
 
+        # === Normalization: Handle List vs Dict ===
+        if isinstance(module_details, list):
+            # Convert list to dict using 'name' as key
+            normalized_details = {}
+            for item in module_details:
+                name = item.get("name", "Unknown")
+                normalized_details[name] = item
+            module_details = normalized_details
+
         issues = []
         valid_mod_ids = set(module_details.keys())
         connected_modules = set()
@@ -869,13 +1015,38 @@ class ConflictSolver:
                     connected_modules.add(tgt)
 
         # Check for Isolated Nodes (Islands)
-        # We consider a node isolated if it is not in the 'connected_modules' set
-        # But we must be careful: some nodes might be purely internal or implicit start/end? 
-        # Typically every node should have at least one connection unless there's only 1 node total.
         if len(valid_mod_ids) > 1:
             for m_id in valid_mod_ids:
                 if m_id not in connected_modules:
                     issues.append(f"- Isolated Node: Module '{m_id}' has no incoming or outgoing connections to other modules.")
+        
+        # Check for Isolated Sub-nodes
+        for m_id, m_info in module_details.items():
+            sub_nodes = m_info.get("sub_nodes", [])
+            if not sub_nodes: continue
+            
+            ports = m_info.get("ports", {})
+            referenced_subnodes = set()
+            
+            # Check incoming (connects_to_internal_node)
+            for edge in ports.get("incoming", []):
+                internal = edge.get("connects_to_internal_node")
+                if internal: referenced_subnodes.add(internal)
+                
+            # Check outgoing (originates_from_internal_node)
+            for edge in ports.get("outgoing", []):
+                internal = edge.get("originates_from_internal_node")
+                if internal: referenced_subnodes.add(internal)
+                
+            # Check internal_flow
+            for flow in ports.get("internal_flow", []):
+                referenced_subnodes.add(flow.get("source_node"))
+                referenced_subnodes.add(flow.get("target_node"))
+                
+            for sub in sub_nodes:
+                sub_name = sub.get("name")
+                if sub_name and sub_name not in referenced_subnodes:
+                     issues.append(f"- Isolated Sub-node: Sub-node '{sub_name}' in Module '{m_id}' is not connected to any internal or external port.")
 
         if not issues:
             return True, "No conflicts found."
@@ -899,6 +1070,16 @@ class ConflictSolver:
         module_details = data.get("module_details", {})
         if not module_details:
             return json.dumps(data)
+
+        # Normalization: Handle List vs Dict
+        if isinstance(module_details, list):
+            print("🕵️ ConflictSolver: Normalized 'module_details' from List to Dict.")
+            normalized_details = {}
+            for item in module_details:
+                name = item.get("name", "Unknown")
+                normalized_details[name] = item
+            module_details = normalized_details
+            data["module_details"] = module_details
 
         print("🕵️ ConflictSolver: Checking topology integrity...")
         
@@ -987,3 +1168,15 @@ class ConflictSolver:
 
         return json.dumps(data, ensure_ascii=False)
     
+
+if __name__ == "__main__":
+    vector_store, graph_store = load_stores()
+    planner = PlannerAgent(client, graph_store)
+    user_query = "Design an LLM-based code education system for children"
+    arch_plan = planner.extract_arch(user_query)
+    divergent_plans = planner.divergent_planning(
+            user_query=user_query,
+            base_anchors=arch_plan.get("anchors", []),
+            num_outputs=1
+    )
+    print(divergent_plans)

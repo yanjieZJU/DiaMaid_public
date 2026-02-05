@@ -91,6 +91,8 @@ class TopologyAnalyzer:
                             "comm": record["m_comm"],
                             "func": record.get("m_func", "")
                         }
+                        if len(node_infos) < 5:
+                            print(f"DEBUG: Node {mid} - Role: {record['m_role']}, Comm: {record['m_comm']}")
                     
                     # Store edge (if next_m exists)
                     next_mid = record["next_m_id"]
@@ -369,31 +371,87 @@ class TopologyAnalyzer:
             
         return topology_knowledge
 
-    def analyze_subsequences(self, sequences, length=3):
+    def generate_pattern_claim(self, role_sequence, context_examples):
+        """
+        Generates a rationale involves a sequence of roles.
+        """
+        seq_str = " -> ".join(role_sequence)
+        
+        examples_text = ""
+        # Limit examples
+        for idx, func_seq in enumerate(context_examples[:5]):
+             # func_seq is a tuple of function descriptions
+             steps_text = "\n".join([f"       Step {i+1} ({role_sequence[i]}): {func}" for i, func in enumerate(func_seq)])
+             examples_text += f"   Example {idx+1}:\n{steps_text}\n"
+
+        prompt = f"""
+        Analyze the common workflow pattern in an AI system.
+        
+        Pattern Sequence: [{seq_str}]
+        
+        Context (Real implementation examples):
+        {examples_text}
+        
+        Task: Synthesize a general technical insight explaining the logical flow and purpose of this sequence.
+        Explain "how" the data is transformed across these steps.
+        Start with "Enables...", "Facilitates...", or similar.
+        Keep it to 1 sentence.
+        """
+        try:
+            response = self.client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.3,
+                max_tokens=100
+            )
+            return response.choices[0].message.content.strip()
+        except Exception as e:
+            return ""
+
+    def analyze_subsequences(self, sequences, length=3, enrich_with_llm=False, probability_threshold=0.2):
         """
         Finds common subsequences of a given length.
-        Sequences are lists of (role, function). We extracting only roles for pattern mining.
+        enrich_with_llm: If True, generates claims for top patterns.
         """
         subseq_counter = collections.Counter()
+        subseq_instances = collections.defaultdict(list)
         
         for seq in sequences:
             if len(seq) < length:
                 continue
             
-            # Extract roles only
+            # Extract roles and functions
             role_seq = [item[0] for item in seq]
+            func_seq = [item[1] for item in seq]
             
             for i in range(len(role_seq) - length + 1):
                 sub = tuple(role_seq[i : i+length])
+                f_sub = tuple(func_seq[i : i+length])
+                
                 subseq_counter[sub] += 1
+                if enrich_with_llm:
+                    subseq_instances[sub].append(f_sub)
                 
         # Format
         results = []
-        for seq_tuple, count in subseq_counter.most_common(10):
-            results.append({
+        # Get total to calc frequency if needed, or just top N
+        total_subseqs = sum(subseq_counter.values())
+        
+        for seq_tuple, count in subseq_counter.most_common(5): # Top 5 patterns
+            pat_entry = {
                 "sequence": list(seq_tuple),
                 "count": count
-            })
+            }
+            
+            if enrich_with_llm and total_subseqs > 0:
+                # Generate claim if enough data
+                # We can reuse the probability logic or just do it for top 5
+                print(f"  Generating claim for pattern: {seq_tuple} (count={count})")
+                claim = self.generate_pattern_claim(list(seq_tuple), subseq_instances[seq_tuple])
+                pat_entry["claim"] = claim
+                
+            results.append(pat_entry)
+            
         return results
 
     def calculate_community_distribution(self, wf_ids, wf_community_map):
@@ -439,7 +497,8 @@ class TopologyAnalyzer:
             if not cluster_seqs: continue
             
             c_trans = self.analyze_transitions(cluster_seqs, enrich_with_llm=True)
-            c_patt3 = self.analyze_subsequences(cluster_seqs, 3)
+            c_patt3 = self.analyze_subsequences(cluster_seqs, 3, enrich_with_llm=True)
+            c_patt4 = self.analyze_subsequences(cluster_seqs, 4, enrich_with_llm=True)
             c_comm_dist = self.calculate_community_distribution(wf_ids, wf_community_map)
             
             cluster_insights[str(label)] = {
@@ -447,6 +506,7 @@ class TopologyAnalyzer:
                 "workflow_count": len(cluster_seqs),
                 "transitions": c_trans,
                 "common_patterns_3": c_patt3,
+                "common_patterns_4": c_patt4,
                 "community_distribution": c_comm_dist
             }
 
