@@ -81,6 +81,7 @@ def chat_with_pdf_openai(pdf_file_path, query):
     try:
         response = client.chat.completions.create(
             model="gemini-2.5-flash", 
+            # model = "chatgpt-4o-latest",
             messages=[
                 {"role": "system", "content": full_prompt},
                 {"role": "user", "content": pdf_content}
@@ -186,65 +187,65 @@ if __name__ == "__main__":
     processed_count = 0
     error_count = 0
     
-    # file_name = "3613904.3641915.pdf"
-    # file_path = os.path.join(pdf_folder, file_name)
-    # answer = chat_with_pdf_openai(file_path, image_extactor_prompt)
-    # if answer:
-    #     save_json_response(json_output_dir, answer, file_name)
+    file_name = "3613904.3642215.pdf"
+    file_path = os.path.join(pdf_folder, file_name)
+    answer = chat_with_pdf_openai(file_path, image_extactor_prompt)
+    if answer:
+        save_json_response(json_output_dir, answer, file_name)
     
-    import random
+    # import random
     
-    # 获取所有PDF文件
-    all_pdf_files = [f for f in os.listdir(pdf_folder) if f.endswith(".pdf")]
+    # # 获取所有PDF文件
+    # all_pdf_files = [f for f in os.listdir(pdf_folder) if f.endswith(".pdf")]
     
-    # 随机采样
-    if len(all_pdf_files) > rnum:
-        pdf_files_to_process = random.sample(all_pdf_files, rnum)
-        print(f"Total PDFs found: {len(all_pdf_files)}. Sampled {rnum} for processing.")
-    else:
-        pdf_files_to_process = all_pdf_files
-        print(f"Total PDFs found: {len(all_pdf_files)}. Processing all.")
+    # # 随机采样
+    # if len(all_pdf_files) > rnum:
+    #     pdf_files_to_process = random.sample(all_pdf_files, rnum)
+    #     print(f"Total PDFs found: {len(all_pdf_files)}. Sampled {rnum} for processing.")
+    # else:
+    #     pdf_files_to_process = all_pdf_files
+    #     print(f"Total PDFs found: {len(all_pdf_files)}. Processing all.")
 
     # for filename in os.listdir(pdf_folder):
     
-    # 遍历选中的PDF文件
-    for filename in pdf_files_to_process:
+    # # 遍历选中的PDF文件
+    # # for filename in pdf_files_to_process:
 
-        if filename.endswith(".pdf"):
-            # Check if JSON file already exists
-            base_name = os.path.splitext(filename)[0]
-            expected_json_path = os.path.join(json_output_dir, f"{base_name}.json")
+    #     if filename.endswith(".pdf"):
+    #         # Check if JSON file already exists
+    #         base_name = os.path.splitext(filename)[0]
+    #         expected_json_path = os.path.join(json_output_dir, f"{base_name}.json")
             
-            if os.path.exists(expected_json_path):
-                print(f"跳过 {filename}: JSON 结果已存在于 {expected_json_path}")
-                continue
+    #         if os.path.exists(expected_json_path):
+    #             print(f"跳过 {filename}: JSON 结果已存在于 {expected_json_path}")
+    #             continue
 
-            pdf_path = os.path.join(pdf_folder, filename)
-            print(f"正在处理: {pdf_path}")
+    #         pdf_path = os.path.join(pdf_folder, filename)
+    #         print(f"正在处理: {pdf_path}")
             
-            try:
-                # 直接使用OpenAI中转API处理PDF内容
-                print("正在调用OpenAI中转API...")
-                answer = chat_with_pdf_openai(pdf_path, image_extactor_prompt)
+    #         try:
+    #             # 直接使用OpenAI中转API处理PDF内容
+    #             print("正在调用OpenAI中转API...")
+    #             answer = chat_with_pdf_openai(pdf_path, image_extactor_prompt)
                 
-                if answer:
-                    print("\n" + "="*20 + " LLM 回答 " + "="*20 + "\n")
-                    print(answer[:500] + "..." if len(answer) > 500 else answer)  # 只显示前500字符
+    #             if answer:
+    #                 print("\n" + "="*20 + " LLM 回答 " + "="*20 + "\n")
+    #                 print(answer[:500] + "..." if len(answer) > 500 else answer)  # 只显示前500字符
                     
-                    # 保存JSON响应
-                    if save_json_response(json_output_dir, answer, filename):
-                        print(f"成功处理: {filename}")
-                        processed_count += 1
-                    else:
-                        print(f"处理失败: {filename}")
-                        error_count += 1
-                else:
-                    print(f"处理失败: {filename}")
-                    error_count += 1
+    #                 # 保存JSON响应
+    #                 if save_json_response(json_output_dir, answer, filename):
+    #                     print(f"成功处理: {filename}")
+    #                     processed_count += 1
+    #                 else:
+    #                     print(f"处理失败: {filename}")
+    #                     error_count += 1
+    #             else:
+    #                 print(f"处理失败: {filename}")
+    #                 error_count += 1
                 
-            except Exception as e:
-                print(f"处理 {filename} 时发生错误: {e}")
-                error_count += 1
-                continue
+    #         except Exception as e:
+    #             print(f"处理 {filename} 时发生错误: {e}")
+    #             error_count += 1
+    #             continue
     
-    print(f"\n处理完成! 成功处理 {processed_count} 个文件，{error_count} 个文件出错。")
+    # print(f"\n处理完成! 成功处理 {processed_count} 个文件，{error_count} 个文件出错。")
