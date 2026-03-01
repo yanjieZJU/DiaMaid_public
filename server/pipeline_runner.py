@@ -24,21 +24,24 @@ def run_pipeline(user_query, num_outputs=1, divergence=True):
     drawer = DrawerAgent(client)
     solver = ConflictSolver() # Initialize Solver
 
+    yield json.dumps({"type": "progress", "message": "Parsing requirements...", "percent": 5}) + "\n"
     arch_plan = planner.extract_arch(user_query)
     
     if not arch_plan:
         print("Failed to extract architecture.")
-        return []
+        yield json.dumps({"type": "error", "message": "Failed to extract architecture."}) + "\n"
+        return
 
     user_relations = arch_plan.get("relations", [])
     
-    results = []
+    yield json.dumps({"type": "progress", "message": "Searching for structural paths...", "percent": 15}) + "\n"
     structural_hints = retriever.retrieve_structure_paths(user_relations)
     
     # Print structural hints once
     if structural_hints:
         print(integrator.format_hints(structural_hints))
 
+    yield json.dumps({"type": "progress", "message": "Planning divergent perspectives...", "percent": 25}) + "\n"
     # === Pre-calculate Divergent Plans for ALL Options ===
     if divergence:
         divergent_plans = planner.divergent_planning(
@@ -51,6 +54,7 @@ def run_pipeline(user_query, num_outputs=1, divergence=True):
 
     # === Step 1: Global Retrieval for Base Anchors (Higher Recall) ===
     print(f"\n🎯 Retrieving Base Anchors (Top-6 for richer context)...")
+    yield json.dumps({"type": "progress", "message": "Extracting domain knowledge and base nodes...", "percent": 35}) + "\n"
     base_nodes_map = retriever.retrieve_for_module(arch_plan.get("anchors", []), top_k=6, include_topology=False)
     
     # Process base nodes into standard format
@@ -128,6 +132,8 @@ def run_pipeline(user_query, num_outputs=1, divergence=True):
              full_query += "; Perspective: "+d_plan.get("perspective", "")+"; Rationale: "+d_plan.get("rationale", "")
 
         # Generate architecture (Initial)
+        base_percent = 35 + (60 / target_iterations) * i
+        yield json.dumps({"type": "progress", "message": f"Generating architecture for option {i+1}...", "percent": int(base_percent + 5)}) + "\n"
         current_arch_json = integrator.integrate_arch(
             query=full_query, 
             retrieved_info=current_ref_info, 
@@ -136,6 +142,7 @@ def run_pipeline(user_query, num_outputs=1, divergence=True):
         )
         
         # === SELF-CORRECTION LOOP ===
+        yield json.dumps({"type": "progress", "message": f"Detecting and resolving conflicts for option {i+1}...", "percent": int(base_percent + 15)}) + "\n"
         max_retries = 2
         for attempt in range(max_retries + 1):
             if not current_arch_json: break
@@ -158,7 +165,8 @@ def run_pipeline(user_query, num_outputs=1, divergence=True):
             # Resolve leftover conflicts (hard cleanup) before drawing
             validated_arch_json_str = solver.resolve(current_arch_json)
             
-            mermaid_code = drawer.draw_flowchart(validated_arch_json_str)
+            # Skip mermaid generation to save extreme time since frontend natively renders the JSON now
+            mermaid_code = "graph TD\n  A[Result rendered directly from JSON using ReactFlow] --> B[No Mermaid needed!]"
             
             # Add perspective info to description
             try:
@@ -171,15 +179,28 @@ def run_pipeline(user_query, num_outputs=1, divergence=True):
                 used_ref = ref_data.get("used", {})
                 explorable_ref = ref_data.get("explorable", [])
                 
+                # Attach reference details directly to module_details
+                for mod_name, details in module_details.items():
+                    if mod_name in used_ref and used_ref[mod_name]:
+                        # Pass the first used reference object associated with the module
+                        first_ref = used_ref[mod_name][0]
+                        details["reference"] = {
+                            "name": first_ref.get("name", "Unknown"),
+                            "technical_details": first_ref.get("text", ""),
+                            "source": first_ref.get("source", "")
+                        }
+                    else:
+                        details["reference"] = None
+                        
             except:
                 module_details = {}
                 raw_desc = ""
                 used_ref = {}
                 explorable_ref = []
 
-            final_desc = additional_desc + raw_desc
+            final_desc = raw_desc
                 
-            results.append({
+            plan_data = {
                 "option_id": i + 1,
                 "perspective": perspective,
                 "mermaid_code": mermaid_code,
@@ -187,12 +208,14 @@ def run_pipeline(user_query, num_outputs=1, divergence=True):
                 "node_details": module_details,
                 "used_references": used_ref,
                 "explorable_references": explorable_ref
-            })
+            }
+            yield json.dumps({"type": "plan", "plan_data": plan_data}) + "\n"
             print(f"\n--- Mermaid Code (Option {i+1}) ---\n{mermaid_code}\n")
         else:
             print(f"❌ Failed to generate architecture for option {i+1}")
+            yield json.dumps({"type": "error", "message": f"Failed to generate architecture for option {i+1}"}) + "\n"
 
-    return results
+    yield json.dumps({"type": "progress", "message": "所有方案生成完毕！", "percent": 100}) + "\n"
 
 if __name__ == "__main__":
     query = "design a system for coding education towards children"

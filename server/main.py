@@ -1,6 +1,7 @@
 import os
 import json
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 from openai import OpenAI
@@ -17,7 +18,7 @@ app = FastAPI()
 # --- CORS Setting ---
 origins = [
     "http://localhost:5173",
-    "[http://127.0.0.1:5173](http://127.0.0.1:5173)",
+    "http://127.0.0.1:5173",
 ]
 
 app.add_middleware(
@@ -89,29 +90,19 @@ async def generate_mermaid(req: GenRequest):
     # run_pipeline 内部有自己的 prompt 逻辑 (在 agents.py 中)
     # 我们需要把 allowRandomNodes 参数传递给 run_pipeline
     
-    print(f"Calling run_pipeline with: {user_message}")
-    try:
-        results = run_pipeline(user_message)
-        if results and len(results) > 0:
-            # 暂时只取第一个生成的方案
-            generated_code = results[0]["mermaid_code"]
-            # 我们还需要返回每个节点的详细描述信息
-            # results[0]["description"] 可能是整个架构的描述，我们需要解析出节点的描述
-            # 实际上 integrator.integrate_arch 返回的是一个 JSON 结构的 architecture
-            # 我们应该让 run_pipeline 返回这个原始 JSON 数据
-            
-            node_details = results[0].get("node_details", {})
-            
-            return {
-                "code": generated_code,
-                "node_details": node_details
-            }
-        else:
-            raise HTTPException(status_code=500, detail="生成失败，未返回有效结果")
+    print(f"Calling streaming run_pipeline with: {user_message}")
+    
+    # 使用 StreamingResponse, media_type设为 ndjson 方便前端按行解析
+    def event_generator():
+        try:
+            # 修改 num_outputs 增加生成方案数量，以流式逐步返回
+            for chunk in run_pipeline(user_message, num_outputs=1, divergence=True):
+                yield chunk
+        except Exception as e:
+            print(f"Pipeline error: {e}")
+            yield json.dumps({"type": "error", "message": str(e)}) + "\n"
 
-    except Exception as e:
-        print(f"LLM 调用出错: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+    return StreamingResponse(event_generator(), media_type="application/x-ndjson")
 
 if __name__ == "__main__":
     import uvicorn

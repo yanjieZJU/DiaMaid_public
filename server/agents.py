@@ -841,9 +841,14 @@ class IntegratorAgent:
                 if not n_name and 'node' in node_data:
                      n_name = node_data['node'].metadata.get('name', '')
                      
+                
                 n_text = node_data.get('text', '')
                 if not n_text and 'node' in node_data:
                     n_text = node_data['node'].text
+                
+                n_source = node_data.get('metadata', {}).get('source', '')
+                if not n_source:
+                    n_source = node_data.get('metadata', {}).get('topology', {}).get('source_file', '')
                 
                 if not n_name: n_name = "Unknown Source"
 
@@ -857,6 +862,7 @@ class IntegratorAgent:
                 entry = {
                     "name": n_name,
                     "text": n_text,
+                    "source": n_source,
                     "source_anchor": anchor
                 }
                 
@@ -916,7 +922,8 @@ class DrawerAgent:
     """
         try: 
             response = self.client.chat.completions.create(
-                model="qwen3-vl-plus",
+                # model="qwen3-vl-plus",
+                model = "gpt-4o-2024-11-20",
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0,
                 response_format={"type": "json_object"},
