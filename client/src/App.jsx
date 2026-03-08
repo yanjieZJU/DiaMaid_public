@@ -4,6 +4,7 @@ import MermaidDiagram from './MermaidDiagram';
 import ResultFlowViewer from './ResultFlowViewer';
 import './App.css';
 import axios from 'axios';
+import { toPng } from 'html-to-image';
 import ReactFlow, {
   addEdge,
   Background,
@@ -40,10 +41,18 @@ function App() {
   // React Flow 实例
   const [reactFlowInstance, setReactFlowInstance] = useState(null);
   const reactFlowWrapper = useRef(null);
+  const resultFlowRef = useRef(null); // Ref for the right panel viewer
 
   const [selectedNodeInfo, setSelectedNodeInfo] = useState(null); // 当前选中节点的信息
+
+  // 新增节点详情弹窗状态
+  const [isNodeModalOpen, setIsNodeModalOpen] = useState(false);
+  const [modalNodeData, setModalNodeData] = useState({ id: null, label: '', description: '', role: '' });
+
   const [editingNodeId, setEditingNodeId] = useState(null); // 当前正在编辑名称的节点ID
   const [editingNodeLabel, setEditingNodeLabel] = useState(''); // 当前编辑的名称
+
+  const [modificationInput, setModificationInput] = useState(''); // 修改需求的输入
 
   const [viewMode, setViewMode] = useState('edit'); // 'edit' = 编辑模式, 'result' = 方案全屏展示模式
 
@@ -304,24 +313,54 @@ function App() {
   }, [nodes, setNodes]);
 
 
-  // 添加节点
-  const addNode = () => {
-    if (!newNodeName.trim()) return;
+  // 打开弹窗准备添加新节点
+  const openAddNodeModal = () => {
+    setModalNodeData({ id: null, label: newNodeName.trim(), description: '', role: '' });
+    setIsNodeModalOpen(true);
+  };
 
-    const newNodeId = `node-${Date.now()}`;
-    const newNode = {
-      id: newNodeId,
-      data: { label: newNodeName.trim() },
-      position: {
-        x: Math.random() * 200 + 50,
-        y: Math.random() * 200 + 50
-      },
-      type: 'default', // 或 'input', 'output'
-      style: { background: '#fff', border: '1px solid #777', padding: '10px', borderRadius: '5px', width: 150 }
-    };
+  // 保存（新增/编辑）弹窗中的节点信息
+  const handleSaveNodeModal = () => {
+    if (!modalNodeData.label.trim()) return;
 
-    setNodes((nds) => [...nds, newNode]);
-    setNewNodeName('');
+    if (modalNodeData.id) {
+      // 更新现有节点
+      setNodes((nds) => nds.map((node) => {
+        if (node.id === modalNodeData.id) {
+          return {
+            ...node,
+            data: {
+              ...node.data,
+              label: modalNodeData.label.trim(),
+              description: modalNodeData.description.trim(),
+              role: modalNodeData.role.trim()
+            }
+          };
+        }
+        return node;
+      }));
+    } else {
+      // 插入新节点
+      const newNodeId = `node-${Date.now()}`;
+      const newNode = {
+        id: newNodeId,
+        data: {
+          label: modalNodeData.label.trim(),
+          description: modalNodeData.description.trim(),
+          role: modalNodeData.role.trim()
+        },
+        position: {
+          x: Math.random() * 200 + 50,
+          y: Math.random() * 200 + 50
+        },
+        type: 'default',
+        style: { background: '#fff', border: '1px solid #777', padding: '10px', borderRadius: '5px', width: 150 }
+      };
+
+      setNodes((nds) => [...nds, newNode]);
+      setNewNodeName('');
+    }
+    setIsNodeModalOpen(false);
   };
 
   const removeNode = (id) => {
@@ -438,43 +477,47 @@ function App() {
     setMermaidCode('');
     setNodeDetails({});
     setProgressText('开始生成...');
-    // 1. 节点列表
-    const nodeNames = nodes.map(n => n.data.label);
-
-    // 2. 关系列表 (Edges)
-    const edgeDescriptions = edges.map(edge => {
-      const sourceNode = nodes.find(n => n.id === edge.source);
-      const targetNode = nodes.find(n => n.id === edge.target);
-      if (sourceNode && targetNode) {
-        return `${sourceNode.data.label} --> ${targetNode.data.label}`;
-      }
-      return '';
-    }).filter(Boolean);
-
-    // 3. 包含关系 (Parent/Child)
-    const groupDescriptions = [];
-    nodes.forEach(node => {
-      if (node.parentNode) {
-        const parent = nodes.find(n => n.id === node.parentNode);
-        if (parent) {
-          groupDescriptions.push(`${parent.data.label} contains ${node.data.label}`);
-        }
-      }
-    });
-
-    const userNodesDescription = [
-      ...nodeNames,
-      ...edgeDescriptions,
-      ...groupDescriptions
-    ];
-
     try {
+      const anchorsPayload = nodes.map(n => ({
+        user_term: n.data.label,
+        description: n.data.description || "",
+        role: n.data.role || ""
+      }));
+
+      const relationsPayload = edges.map(e => {
+        const sourceNode = nodes.find(n => n.id === e.source);
+        const targetNode = nodes.find(n => n.id === e.target);
+        if (sourceNode && targetNode) {
+          return {
+            source: sourceNode.data.label,
+            target: targetNode.data.label,
+            type: "FLOWS_TO"
+          };
+        }
+        return null;
+      }).filter(Boolean);
+
+      // 组装 subgraph 关系 (父包含子等同于一种结构)
+      nodes.forEach(node => {
+        if (node.parentNode) {
+          const parent = nodes.find(n => n.id === node.parentNode);
+          if (parent) {
+            relationsPayload.push({
+              source: parent.data.label,
+              target: node.data.label,
+              type: "CONTAINS"
+            });
+          }
+        }
+      });
+
       const response = await fetch('http://localhost:8000/generate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           prompt: description,
-          userNodes: userNodesDescription
+          anchors: anchorsPayload,
+          relations: relationsPayload
         })
       });
 
@@ -502,7 +545,12 @@ function App() {
               setProgressText(data.message || '生成中...');
             } else if (data.type === 'plan') {
               // Add plan to state
-              newPlans = [...newPlans, data.plan_data];
+              const initialHistory = [
+                { role: 'system', content: `初始方案已生成: ${data.plan_data.perspective}`, timestamp: Date.now() }
+              ];
+              const planWithHistory = { ...data.plan_data, history: initialHistory };
+
+              newPlans = [...newPlans, planWithHistory];
               setPlans(newPlans);
 
               if (!isFirstPlanLoaded) {
@@ -527,6 +575,138 @@ function App() {
     } catch (error) {
       console.error(error);
       setMermaidCode(`graph TD\nError[生成失败: ${error.message}]`);
+    } finally {
+      setLoading(false);
+      setProgressText('');
+    }
+  };
+
+  const handleEdit = async () => {
+    if (!modificationInput.trim()) return;
+    if (plans.length === 0 || !plans[activePlanIndex]) return;
+
+    // Store user message immediately
+    const userMsg = { role: 'user', content: modificationInput, timestamp: Date.now() };
+
+    // Optimistically update UI to show user message
+    setPlans(prevPlans => {
+      const updated = [...prevPlans];
+      const current = updated[activePlanIndex];
+      updated[activePlanIndex] = {
+        ...current,
+        history: [...(current.history || []), userMsg]
+      };
+      return updated;
+    });
+
+    setLoading(true);
+    setProgress(0);
+    setProgressText('正在根据您的需求修改方案...');
+
+    try {
+      const currentPlan = plans[activePlanIndex];
+      // Construct payload
+      const payload = {
+        plan_id: currentPlan.plan_id, // Pass plan_id
+        current_plan: {
+          module_details: currentPlan.node_details,
+          overall_description: currentPlan.description,
+        },
+        instruction: modificationInput,
+        original_query: description
+      };
+
+      // Clear input immediately
+      setModificationInput('');
+
+      const response = await fetch('http://localhost:8000/edit', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+
+      if (!response.body) throw new Error('ReadableStream not yet supported.');
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder('utf-8');
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        const chunkStr = decoder.decode(value, { stream: true });
+        const lines = chunkStr.split('\n').filter(line => line.trim() !== '');
+
+        for (const line of lines) {
+          try {
+            const data = JSON.parse(line);
+            if (data.type === 'progress') {
+              setProgress(data.percent || 0);
+              setProgressText(data.message || '修改中...');
+            } else if (data.type === 'plan') {
+              // Update the current plan with the new one
+              const newPlanData = data.plan_data;
+
+              setPlans(prevPlans => {
+                const updatedPlans = [...prevPlans];
+                // Append modification history to perspective if needed, or just update
+                // For now, let's keep the perspective but mark as modified
+                let newPerspective = newPlanData.perspective;
+                if (!newPerspective.includes('(已修改)')) {
+                  newPerspective = `(已修改) ${currentPlan.perspective}`;
+                }
+
+                // Add system success message
+                const sysMsg = { role: 'system', content: `修改完成: ${data.plan_data.description ? data.plan_data.description.substring(0, 50) + '...' : '架构已更新'}`, timestamp: Date.now() };
+                const currentHistory = updatedPlans[activePlanIndex].history || [];
+
+                updatedPlans[activePlanIndex] = {
+                  ...newPlanData,
+                  perspective: newPerspective,
+                  history: [...currentHistory, sysMsg]
+                };
+                return updatedPlans;
+              });
+
+              // Update current view immediately
+              setMermaidCode(newPlanData.mermaid_code || '');
+              if (newPlanData.node_details) {
+                setNodeDetails(newPlanData.node_details);
+              }
+
+            } else if (data.type === 'error') {
+              console.error('Edit error:', data.message);
+              // Add error message to history
+              setPlans(prevPlans => {
+                const updated = [...prevPlans];
+                const current = updated[activePlanIndex];
+                updated[activePlanIndex] = {
+                  ...current,
+                  history: [...(current.history || []), { role: 'system', content: `Error: ${data.message}`, isError: true, timestamp: Date.now() }]
+                };
+                return updated;
+              });
+              alert(`修改失败: ${data.message}`);
+            }
+          } catch (e) {
+            console.error('Error parsing chunk', e);
+          }
+        }
+      }
+
+    } catch (error) {
+      console.error(error);
+      alert(`请求失败: ${error.message}`);
+      // Add error message to history
+      setPlans(prevPlans => {
+        const updated = [...prevPlans];
+        const current = updated[activePlanIndex];
+        updated[activePlanIndex] = {
+          ...current,
+          history: [...(current.history || []), { role: 'system', content: `Request Error: ${error.message}`, isError: true, timestamp: Date.now() }]
+        };
+        return updated;
+      });
     } finally {
       setLoading(false);
       setProgressText('');
@@ -596,6 +776,53 @@ function App() {
     setSelectedNodeInfo(null);
   };
 
+  const handleExport = async () => {
+    if (!resultFlowRef.current) return;
+    if (plans.length === 0 || !plans[activePlanIndex]) return;
+
+    setLoading(true);
+    setProgress(0);
+    setProgressText('Generating Document...');
+    try {
+      // 1. Capture React Flow component to PNG
+      const dataUrl = await resultFlowRef.current.exportImage();
+
+      const currentPlan = plans[activePlanIndex];
+
+      // 2. Fetch the /export endpoint
+      const response = await fetch('http://localhost:8000/export', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          image: dataUrl,
+          plan: nodeDetails
+        })
+      });
+
+      if (!response.ok) {
+        throw new Error(`Export failed: ${response.statusText}`);
+      }
+
+      // 3. Download the resulting document
+      const blob = await response.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `architecture_plan_${new Date().getTime()}.docx`;
+      document.body.appendChild(a);
+      a.click();
+      window.URL.revokeObjectURL(url);
+      document.body.removeChild(a);
+
+    } catch (err) {
+      console.error("Export Error: ", err);
+      alert(`Failed to export document: ${err.message}`);
+    } finally {
+      setLoading(false);
+      setProgressText('');
+    }
+  };
+
   return (
     <div className="app-container" onClick={closeNodeDetails}>
       <header>
@@ -614,12 +841,30 @@ function App() {
 
               {viewMode === 'result' && (
                 <div style={{ flex: 1, backgroundColor: '#f5f7fa', borderRadius: '4px', padding: '10px', marginBottom: '10px', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '10px', border: '1px solid #eee' }}>
-                  <div style={{ alignSelf: 'flex-end', backgroundColor: '#e3f2fd', padding: '8px 12px', borderRadius: '8px 8px 0 8px', maxWidth: '85%', fontSize: '0.9rem', color: '#333' }}>
-                    {description || '无初始描述'}
-                  </div>
-                  <div style={{ alignSelf: 'flex-start', backgroundColor: '#fff', border: '1px solid #ddd', padding: '8px 12px', borderRadius: '8px 8px 8px 0', maxWidth: '85%', fontSize: '0.9rem', color: '#555' }}>
-                    方案已生成，您可以在此输入后续的修改和优化需求。
-                  </div>
+                  {/* Render History */}
+                  {plans.length > 0 && plans[activePlanIndex] && plans[activePlanIndex].history && plans[activePlanIndex].history.map((msg, idx) => (
+                    <div key={idx} style={{
+                      alignSelf: msg.role === 'user' ? 'flex-end' : 'flex-start',
+                      backgroundColor: msg.role === 'user' ? '#e3f2fd' : (msg.isError ? '#ffebee' : '#fff'),
+                      border: msg.role === 'user' ? 'none' : '1px solid #ddd',
+                      padding: '8px 12px',
+                      borderRadius: msg.role === 'user' ? '8px 8px 0 8px' : '8px 8px 8px 0',
+                      maxWidth: '85%',
+                      fontSize: '0.9rem',
+                      color: msg.isError ? '#c62828' : '#333',
+                      boxShadow: '0 1px 2px rgba(0,0,0,0.05)'
+                    }}>
+                      {msg.role === 'system' && <strong style={{ display: 'block', fontSize: '0.8rem', color: '#666', marginBottom: '2px' }}>System</strong>}
+                      {msg.content}
+                    </div>
+                  ))}
+
+                  {/* Fallback for empty history or loading state */}
+                  {(!plans[activePlanIndex] || !plans[activePlanIndex].history || plans[activePlanIndex].history.length === 0) && (
+                    <div style={{ alignSelf: 'center', color: '#999', fontSize: '0.85rem', marginTop: '20px' }}>
+                      暂无修改记录
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -627,17 +872,23 @@ function App() {
                 className="styled-input"
                 rows={viewMode === 'result' ? 3 : 4}
                 placeholder={viewMode === 'result' ? "输入方案优化需求..." : "例如：设计一个包含RAG和LLM的历史教育系统..."}
-                value={viewMode === 'result' ? "" : description}
+                value={viewMode === 'result' ? modificationInput : description}
                 onChange={(e) => {
                   if (viewMode === 'edit') setDescription(e.target.value);
+                  else setModificationInput(e.target.value);
                 }}
-                disabled={viewMode === 'result'}
+                disabled={loading}
                 style={viewMode === 'result' ? { flexShrink: 0, resize: 'none' } : {}}
               />
 
               {viewMode === 'result' && (
-                <button className="btn-primary" style={{ marginTop: '10px', flexShrink: 0 }} disabled>
-                  发送 (开发中)
+                <button
+                  className="btn-primary"
+                  style={{ marginTop: '10px', flexShrink: 0 }}
+                  disabled={loading || !modificationInput.trim()}
+                  onClick={handleEdit}
+                >
+                  {loading ? '修改中...' : '发送修改指令'}
                 </button>
               )}
             </div>
@@ -658,11 +909,11 @@ function App() {
                   placeholder="节点名称"
                   value={newNodeName}
                   onChange={(e) => setNewNodeName(e.target.value)}
-                  onKeyDown={(e) => e.key === 'Enter' && addNode()}
+                  onKeyDown={(e) => e.key === 'Enter' && openAddNodeModal()}
                 />
                 <button
                   className="btn-add"
-                  onClick={addNode}
+                  onClick={openAddNodeModal}
                   style={{
                     marginLeft: '5px',
                     whiteSpace: 'nowrap',
@@ -864,22 +1115,40 @@ function App() {
 
               {/* 返回/全屏 按钮 */}
               {plans.length > 0 && (
-                <button
-                  onClick={() => setViewMode(viewMode === 'result' ? 'edit' : 'result')}
-                  style={{
-                    marginRight: '15px',
-                    padding: '6px 15px',
-                    backgroundColor: viewMode === 'result' ? '#fff' : '#217cf3',
-                    color: viewMode === 'result' ? '#217cf3' : '#fff',
-                    border: '1px solid #217cf3',
-                    borderRadius: '4px',
-                    cursor: 'pointer',
-                    fontSize: '13px',
-                    fontWeight: '500'
-                  }}
-                >
-                  {viewMode === 'result' ? '← 返回工作区' : '全屏查看方案'}
-                </button>
+                <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
+                  <button
+                    onClick={handleExport}
+                    disabled={loading}
+                    style={{
+                      padding: '6px 15px',
+                      backgroundColor: '#28a745',
+                      color: '#fff',
+                      border: '1px solid #28a745',
+                      borderRadius: '4px',
+                      cursor: 'pointer',
+                      fontSize: '13px',
+                      fontWeight: '500'
+                    }}
+                  >
+                    导出为 Word
+                  </button>
+                  <button
+                    onClick={() => setViewMode(viewMode === 'result' ? 'edit' : 'result')}
+                    style={{
+                      marginRight: '15px',
+                      padding: '6px 15px',
+                      backgroundColor: viewMode === 'result' ? '#fff' : '#217cf3',
+                      color: viewMode === 'result' ? '#217cf3' : '#fff',
+                      border: '1px solid #217cf3',
+                      borderRadius: '4px',
+                      cursor: 'pointer',
+                      fontSize: '13px',
+                      fontWeight: '500'
+                    }}
+                  >
+                    {viewMode === 'result' ? '← 返回工作区' : '全屏查看方案'}
+                  </button>
+                </div>
               )}
             </div>
 
@@ -889,6 +1158,7 @@ function App() {
                 {Object.keys(nodeDetails).length > 0 ? (
                   <div style={{ width: '100%', height: '100%' }}>
                     <ResultFlowViewer
+                      ref={resultFlowRef}
                       nodeDetails={nodeDetails}
                       onNodeClick={handleMermaidNodeClick}
                     />
@@ -1029,6 +1299,47 @@ function App() {
 
         </div>
       </main>
+
+      {/* Node Details Modal */}
+      {isNodeModalOpen && (
+        <div className="modal-overlay" style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(0,0,0,0.5)', display: 'flex', justifyContent: 'center', alignItems: 'center', zIndex: 1000 }}>
+          <div className="modal-content" style={{ backgroundColor: '#fff', padding: '20px', borderRadius: '8px', width: '400px', maxWidth: '90%' }}>
+            <h3 style={{ marginTop: 0 }}>{modalNodeData.id ? '编辑节点' : 'Add Node'}</h3>
+            <div style={{ marginBottom: '10px' }}>
+              <label style={{ display: 'block', marginBottom: '5px' }}>Name:</label>
+              <input
+                className="styled-input"
+                value={modalNodeData.label}
+                onChange={e => setModalNodeData({ ...modalNodeData, label: e.target.value })}
+                autoFocus
+              />
+            </div>
+            <div style={{ marginBottom: '10px' }}>
+              <label style={{ display: 'block', marginBottom: '5px' }}>Description:</label>
+              <textarea
+                className="styled-input"
+                rows={3}
+                value={modalNodeData.description}
+                onChange={e => setModalNodeData({ ...modalNodeData, description: e.target.value })}
+              />
+            </div>
+            <div style={{ marginBottom: '20px' }}>
+              <label style={{ display: 'block', marginBottom: '5px' }}>Role (Optional):</label>
+              <input
+                className="styled-input"
+                value={modalNodeData.role}
+                onChange={e => setModalNodeData({ ...modalNodeData, role: e.target.value })}
+                placeholder="例如: processing_core"
+              />
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px' }}>
+              <button className="btn-clear" style={{ padding: '8px 15px', border: '1px solid #ccc', background: '#f5f5f5', borderRadius: '4px', cursor: 'pointer' }} onClick={() => setIsNodeModalOpen(false)}>Cancel</button>
+              <button className="btn-primary" style={{ padding: '8px 15px', background: '#217cf3', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer' }} onClick={handleSaveNodeModal}>Save</button>
+            </div>
+          </div>
+        </div>
+      )}
+
     </div>
   );
 }

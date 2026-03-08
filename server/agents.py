@@ -7,6 +7,7 @@ import os
 from openai import OpenAI
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
+import concurrent.futures
 
 # Add parent directory to path for config import
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -14,7 +15,9 @@ from config import *
 from retriever_neo4j import (
     load_stores, 
     retrieve_and_get_content, 
-    find_structural_path
+    find_structural_path,
+    run_with_retry,
+    execute_read_with_session
 )
 
 http_client = httpx.Client(proxy=None, trust_env=False)
@@ -108,70 +111,6 @@ class PlannerAgent:
         self._precompute_cluster_embeddings()
         self.client = client
         self.graph_store = graph_store  
-
-    def extract_arch(self, user_query):
-        """
-        Extract explicit architecture from user query.
-
-        Args:
-            user_query (str): The user query.
-
-        Returns:
-            dict: The extracted architecture.
-        """
-        
-        
-        prompt = f"""
-            You are a system architect and requirement analyst.
-            
-            ## Task
-            Given a user query with a user-constructed workflow, output its normalized structure in JSON code.
-            1. Identify mandatory components (anchors) and the connection topology (including parallel connections, data flows, subgraphs, etc. if any) from user query. 
-            2. Extract **ONLY** the entities explicitly mentioned in the user query or those strictly implied as standard infrastructure (e.g., a database if "save data" is mentioned). **DO NOT** invent new functional modules that were not requested.
-            3. For each anchor: based on the user's requirements and the current context, infer the user's expectations for each anchor (their role within the entire workflow), and formulate a concise description.
-            4. Extract ALL user defined relations (explicit) from the user query. For example, the arrow '-->' means the data flow from source to target, the use of subgraph means the inclusion relationship. DO NOT REPEAT.
-            5. For each anchor, you must also infer its functional role based on the following taxonomy:
-            {TAXONOMY}\n\n
-            (Output the Level 1 category, or 'Level 1: Level 2' if you are sure)
-            Output Structure (in JSON format)
-            {{
-                "design_goal": "A concise summary of the system's purpose based strictly on the query.",
-                "anchors": [
-                    {{
-                        "user_term": "the user term for this anchor, e.g., AI tutor",
-                        "role": "the role of this anchor, choose from [user_entity, sensing_input, processing_core, interface_output, infrastructure]",
-                        "description": "the description of this anchor, e.g., answer questions about the user's topic."
-                    }}
-                ],
-                "relations":[
-                    {{
-                        "source": "the source anchor of this relation, e.g., AI tutor",
-                        "target": "the target anchor of this relation, e.g., user",
-                        "type": "the type of this relation, e.g., DATAFLOW, CONTAINS"
-                    }}
-                ]
-            }}
-
-            User Query: {user_query}
-        """
-        try:
-            response = self.client.chat.completions.create(
-                model="gpt-4o",
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0,
-                response_format={"type": "json_object"},
-            ).choices[0].message.content
-            print(f"LLM Response: {str(response)}")
-        except Exception as e:
-            print(f"Error: {e}")
-            return None
-        try:
-            plan = json.loads(response)
-            return plan
-        except json.JSONDecodeError:
-            print("Failed to parse JSON response.")
-            return None
-        
 
     def divergent_planning(self, user_query, base_anchors, num_outputs=2):
         """
@@ -290,23 +229,34 @@ class PlannerAgent:
 
             cluster_data = self.topology_knowledge["scene_clusters"][c_id]
             
-            # Get top N communities for this cluster
+            # Get communities for this cluster
             comm_dist = cluster_data.get("community_distribution", {})
-            top_comms_ids = sorted(comm_dist.items(), key=lambda x: x[1], reverse=True)[:5] # Top 5 communities
+            sorted_comms = sorted(comm_dist.items(), key=lambda x: x[1], reverse=True)
+            top_comms_ids = sorted_comms[:6]
+                
             relevant_comm_ids = [c[0] for c in top_comms_ids]
             
             # Fetch summaries for these communities
             comm_summaries_text = []
             if relevant_comm_ids:
-                with self.graph_store._driver.session() as session:
+                def _fetch_comm_summaries(tx, comm_ids):
                     cypher = """
                     MATCH (n:LlamaNode) 
                     WHERE n.community_L0 IN $comm_ids
                     RETURN DISTINCT n.community_L0 as id, n.summary_L0 as summary
                     """
-                    result = session.run(cypher, comm_ids=relevant_comm_ids)
-                    for record in result:
+                    result = tx.run(cypher, comm_ids=comm_ids)
+                    return list(result)
+
+                # Use run_with_retry for Neo4j interaction
+                try:
+                    records = run_with_retry(
+                        lambda: execute_read_with_session(self.graph_store._driver, _fetch_comm_summaries, relevant_comm_ids)
+                    )
+                    for record in records:
                         comm_summaries_text.append(f"- [Community {record['id']}]: {record['summary']}")
+                except Exception as e:
+                    print(f"⚠️ Failed to fetch community summaries for planning: {e}")
             
             # Extract Common Patterns with Claims
             patterns_text = [] 
@@ -341,7 +291,7 @@ class PlannerAgent:
         We have already identified the following BASE components (Anchors): ```{base_anchors_str}```.
         
         ## Task
-        Generate **{num_outputs}** DISTINCT and DIVERGENT extension plans to enhance this system. 
+        Generate **{num_outputs}** DISTINCT and DIVERGENT extension plans from different function implementation paths to enhance this system. 
         
         ## Reference Material (Knowledge Injection)
         We have retrieved knowledge from different domain clusters to inspire you.
@@ -354,22 +304,25 @@ class PlannerAgent:
         **Plan 1 (Deep Optimization)**:
         - Use **Source 1** (Near-Field) as your inspiration.
         - If Source 1 states "No papers highly relevant", explicitly mention "No papers highly relevant to this system were retrieved" in your rationale, and rely on general HCI knowledge to professionalize the system.
-        - Look for professional details or standard modules in this domain that are missing from the Base Anchors.
-        - Refine the system to be more professional and complete.
+        - Focus on discovering **innovative and feasible functional embeddings** and deep professional details missing from the Base Anchors. Focus on the most advanced or unique technical methods in the community summaries, rather than the most conventional ones.
         
         **Plan 2 (Cross-Domain Inspiration)** (If requested):
         - Use **Source 2** (Far-Field) as your inspiration.
-        - Perform **Concept Blending**: specific methods from Source 2 (e.g., "Medical Monitoring") should be metaphorically transferred to the User's domain (e.g., "Education Monitoring").
-        - Ask yourself: "How would an expert in Source 2 solve the problems in the User's query?"
+        - Focus on **innovative cross-domain transfer**: Instead of just introducing conventional ideas, extract typical processing patterns, novel technologies or main implementation methods from Source 2 that can significantly improve the User's domain.
+        - Perform **Concept Blending**: specific methods from Source 2 (e.g., "Medical Monitoring") should be metaphorically and innovatively transferred to the User's domain (e.g., "Education Monitoring").
+        - Ask yourself: "How would an expert with new tech in Source 2 solve the problems in the User's query?"
         
         **Plan 3+** (If requested):
-        - Use **Source 3+** similarly for distinct cross-domain features.
+        - Use **Source 3+** similarly to propose a DISTINCT innovative functional embedding, differing in implementation methods or referenced technologies from previous plans.
 
         ## General Constraint
-        1. **Incremental Only**: 
-           - Do NOT repeat the Base Anchors. Output ONLY the ADDITIONAL components (modules).
-           - **CRITICAL**: Do NOT propose modules that are merely synonyms or simple rephrasings of Base Anchors (e.g., if "Tutor" exists, do not add "Instructor Agent"). New anchors must add **distinct new functionality**.
-        2. **Specific Anchors**:
+        1. When you add new functions, always consider its *feasibility* in the given context.
+        2. **Base Anchors Preservation**:
+           - **CRITICAL**: The existing Base Anchors represent the core of the system. Your divergent plans MUST acknowledge them, build upon them, and seamlessly integrate new functionalities with them across ALL plans.
+        3. **Incremental Only**: 
+           - Do NOT output the existing Base Anchors in your array. Output ONLY the KEY and ADDITIONAL innovative components (modules). IF Base Anchors do NOT exist, extract the key components from the user's query and add them.
+           - **CRITICAL**: Do NOT propose modules that are merely synonyms or simple rephrasings of Base Anchors (e.g., if "Tutor" exists, do not add "Instructor Agent"). New anchors must add **distinct and innovative new functionality**.
+        4. **Specific Anchors**:
            - Each additional component must have a 'user_term', a 'description', a 'role', and a 'community_id' (from the reference source).
            - Recheck data flow logic.
 
@@ -380,7 +333,7 @@ class PlannerAgent:
         {{
             "plans": [
                 {{
-                    "perspective": "use short sentence or phrases to describe the perspective (e.g., 'Biometric-Adaptive Interaction')",
+                    "perspective": "use phrases or one short sentence to describe the perspective, highlighting the key functions or biggest advantages and innovations of this design (e.g., 'Immersive interactive feedback'). Do not just copy the perspective title or vague terms like 'cross-domain'",
                     "rationale": "Explain explicitly: 'Inspired by [Source Name], we introduced [Feature] to achieve [Goal]...'",
                     "additional_anchors": [
                         {{
@@ -395,7 +348,7 @@ class PlannerAgent:
             ]
         }}
         """
-        print(prompt)
+        # print(prompt)
         print(f"\n🧠 Generating {num_outputs} divergent plans...")
         try:
             response = self.client.chat.completions.create(
@@ -430,52 +383,59 @@ class RetrieverAgent:
 
     def retrieve_for_module(self, anchors_list, top_k=3, include_topology=True):
         anchor_mapping = {}
-        for anchor in anchors_list:
+        
+        def fetch_single_anchor(anchor):
             user_term = anchor["user_term"]
             description = anchor["description"]
-            role = anchor.get("role", None) # Get role
-            community_id = anchor.get("community_id", None) # Get structured community ID
-
+            role = anchor.get("role", None)
+            community_id = anchor.get("community_id", None)
+            
             query_text = f"{user_term}: {description}"
-        
+            
             retrieved_nodes = retrieve_and_get_content(
                 query_text, 
                 self.vector_store, 
                 self.graph_store, 
                 top_k,
                 node_type="MODULE",
-                role_filter=role, # Pass role filter
-                community_id=community_id, # Pass community filter
+                role_filter=role,
+                community_id=community_id,
                 include_topology=include_topology
             )
+            return user_term, retrieved_nodes
 
-            if retrieved_nodes:
-                anchor_mapping[user_term] = retrieved_nodes
-                for n in retrieved_nodes:
-                    print(f"Found: {n.node.metadata.get('name', '')} (Score: {n.score:.4f})")
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(10, len(anchors_list) or 1)) as executor:
+            future_to_anchor = {executor.submit(fetch_single_anchor, anchor): anchor for anchor in anchors_list}
+            for future in concurrent.futures.as_completed(future_to_anchor):
+                try:
+                    user_term, retrieved_nodes = future.result()
+                    if retrieved_nodes:
+                        anchor_mapping[user_term] = retrieved_nodes
+                        for n in retrieved_nodes:
+                            print(f"Found: {n.node.metadata.get('name', '')} (Score: {n.score:.4f})")
+                except Exception as exc:
+                    print(f"Retrieval generated an exception: {exc}")
 
         return anchor_mapping
     
-    def retrieve_for_skeleton(self, design_goal, threshold=0.5):
-        query_text = f"{design_goal}"
-        retrieved_nodes = retrieve_and_get_content(
-            query_text, 
-            self.vector_store, 
-            self.graph_store, 
-            top_k=10,
-            node_type="WORKFLOW",
-        )
-        return retrieved_nodes
-    
     def retrieve_structure_paths(self, user_relations):
-        structral_hints = []
-        for rel in user_relations:
+        structural_hints = []
+        
+        def fetch_single_path(rel):
             src = rel["source"]
             tgt = rel["target"]
-            paths = find_structural_path(src, tgt, rel_type=rel["type"], vector_store=self.vector_store, graph_store=self.graph_store)
-            structral_hints.extend(paths)
+            return find_structural_path(src, tgt, rel_type=rel["type"], vector_store=self.vector_store, graph_store=self.graph_store)
+            
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(10, len(user_relations) or 1)) as executor:
+            future_to_rel = {executor.submit(fetch_single_path, rel): rel for rel in user_relations}
+            for future in concurrent.futures.as_completed(future_to_rel):
+                try:
+                    paths = future.result()
+                    structural_hints.extend(paths)
+                except Exception as exc:
+                    print(f"Structural path retrieval generated an exception: {exc}")
 
-        return structral_hints
+        return structural_hints
     
     def rerank_with_llm(self, query, retrieved_skeletons):
         if not retrieved_skeletons: return []
@@ -578,7 +538,7 @@ class IntegratorAgent:
         hints_text += "\n"
         return hints_text
     
-    def integrate_arch(self, query, retrieved_info, structural_hints=[], divergent_plan=None):
+    def integrate_arch(self, query, retrieved_info, structural_hints=[], divergent_plan=None, base_anchors=[]):
         """
         Integrates all information to generate the final system architecture.
 
@@ -587,6 +547,7 @@ class IntegratorAgent:
             retrieved_info (dict): Retrieved specific module information.
             structural_hints (list): Structural paths found between components.
             divergent_plan (dict): The structured plan from divergent_planning (optional).
+            base_anchors (list): The list of user-defined base anchors.
 
         Returns:
             dict: The final integrated architecture plan.
@@ -620,9 +581,9 @@ class IntegratorAgent:
                 {modules_list_str}
                 
                 **Integration Strategy**:
-                1. **Sub-System Mounting**: Treat these modules as a coherent "plugin" or "feature branch".
-                - They often form a SUB-LOOP (e.g., feedback loop) or a PARALLEL BRANCH (e.g., multi-modal input).
-                - Do NOT scatter them randomly. Keep them logically connected to specific "Hook Points" in the main flow (e.g., attach a new 'Stress Analyzer' to the main 'Decision Logic').
+                1. **Sub-System Mounting**: TDepending on their nature, weave these extension modules deeply into the architecture.
+                - For the modules that align with the main idea of the plan, design around this new model and restructure the related basic nodes to make them the core functions.
+                - Ensure a rich data flow and interconnections. If they inherently need to interact with multiple components (such as memory tracking, sensory input, and user interface), do not limit them to a single "hook point".
                 
                 2. **Conflict Handling**:
                 - If an Extension Module conflicts with a User Module (e.g., "Standard Camera" vs. "Specialized Eye-Tracker"), **Prioritize the User's explicit choice**, but consider using the Extension Module as an *alternative input* or *enhancement*.
@@ -659,10 +620,14 @@ class IntegratorAgent:
             slim_retrieved_info[anchor] = slim_nodes
 
         prompt = f"""
-        You are a professional designer and architect in the field of HCI. Design a complete pipeline based on the user's requirements and the retrieved information.
+        You are a professional designer and architect in the field of HCI. Design a *complete and detailed* pipeline based on the user's requirements and the retrieved information.
+        
         ## User Requirements
-        The user requirements are the principle you should follow the most. The nodes in the query must be included in the pipeline.
         User Query: ```{query}```
+        
+        ## Base Anchors (MANDATORY)
+        The following Base Anchors were explicitly requested by the user. **You MUST include ALL of these modules in your final pipeline architecture.** You can modify its name, details, and implementation method, but please retain the main functions as requested by the users. Do not drop them under any circumstances.
+        Base Anchors: ```{json.dumps(base_anchors, ensure_ascii=False) if base_anchors else "None provided"}```
         \n\n
         ## Retrieved Information
         You have the following sources of information. Use them according to the rules.
@@ -672,8 +637,8 @@ class IntegratorAgent:
             - Each conceptual step may have retrieved multiple nodes with similar functions. You need to conduct appropriate screening or combination to be able to assemble a complete process.
         2. **Structural Paths**: 
             - These are retrieved data flow connections between conceptual steps derived from the user's requirements.
-            - Use them to determine HOW the user's nodes should be connected.
-            - If the paths suggest the need for an intermediate node (e.g., Sensor -> [Buffer] -> LLM), then such a node should be added.
+            - **CRITICAL**: Use them as the ground truth to determine HOW the user's nodes should be connected. Do not invent arbitrary connections if a structural path already defines them.
+            - If the paths suggest the need for an intermediate node (e.g., Sensor -> [Buffer] -> LLM), then such a node MUST be added to connect the Base Anchors logically.
 
         ## Data Sources
         {extension_context}
@@ -687,12 +652,13 @@ class IntegratorAgent:
         1. **Define Modules**: Sort out user requirements and retrieved information and define the necessary modules in the entire architecture.
             - **Naming Rule**: Use **Generic Functional Names** (e.g., "Gaze Tracker", "Dialogue Manager") for the modules. **DO NOT** use specific paper titles, citation indices, or long implementation names (e.g. NOT "Gaze360: Physically Unconstrained...").
             - Ensure the added nodes from the divergent plans are integrated meaningfully.
-            - If there are subnodes within the modules (based on the retrieved information and relevant to the current context), they should also be defined.
+            - If there are subnodes within the modules (based on the retrieved information and relevant to the current context), they should also be defined. Explicitly map out the intermediate processes and data flow within the module using subnodes so its internal logic is transparent.
+            - **Detail Requirement**: Provide highly detailed descriptions for both `function` and `technical_methods` from the retrieved information BUT DO NOT FABRICATE. You must explicitly articulate the module's specific role, core responsibilities, and crucial importance within the overall system. Explain exactly HOW the technical methods work, process data, and why they were chosen, avoiding brief or vague summaries.
         2. **Connect the Flow**: Use the topology info to decide logical connections. 
+            - Ensure new conceptual modules have comprehensive connections with the base logic to fully realize their functional value. DO NOT let them become dead ends unless explicitly defined as output endpoints.
             - All the connections should be implemented from the modules defined above. Do not include any other nodes, especially when defining the source_mod and the target_mod in ports.
             - **Graph Cleaning**: Merge parallel edges between the same two nodes. Do not create 'shadow' nodes that duplicate existing functions. Ensure the graph is a single connected component if possible.
             - If Module A usually follows Module B in Paper X, try to preserve that flow if it fits.
-
         3. **Check the architecture**:
             - REMOVE redundant nodes and connections (perform the same function even with different names).
             - REMOVE or RECHECK any nodes that are isolated or unused.
@@ -703,15 +669,16 @@ class IntegratorAgent:
             "module_details": [
                 "<module name>": {{
                     "name": "the module name",
-                    "function": "the functions of this module",
-                    "technical_methods": "the technical methods used in this module",
+                    "brief_description": "A one-sentence concise explanation of the module's core functional role, meant directly for rendering on the visual node. Emphasize how it serves the current scenario without paper-specific jargon.",
+                    "function": "Detailed explanation of the module's function, its core responsibilities, and its crucial role and importance within the overall system architecture.",
+                    "technical_methods": "Detailed description of the specific algorithms, models, or technical methods used, including HOW they process data and why they are selected. You MUST abstract away the original paper context. Translate the core technical concepts into generic terms and tightly fuse them with the user's specific scenario. The generated explanations should feel like a native, tailored solution to the user's problem.",
                     "role": "choose from ["input", "output", "processing", "data"]",
                     "references": "Exact names of the sourced modules from Retrieved Information, comma-separated. Use 'None' if not available.",
                     "sub_nodes": [
                         {{
                             "name": "name of the subnode",
-                            "function": "function of the subnode",
-                            "technical_methods": "technical methods used"
+                            "function": "Detailed description of the subnode's specific function, purpose, and contribution to its parent module.",
+                            "technical_methods": "Detailed description of the specific technical implementation and methods used by this subnode."
                         }}
                     ],
                     "ports": {{
@@ -875,96 +842,135 @@ class IntegratorAgent:
                     
         return {"used": used_output, "explorable": explorable_output}
 
-class DrawerAgent:
+class EditorAgent:
     def __init__(self, client):
         self.client = client
-    
-    def draw_flowchart(self, arch_plan):
+
+    def analyze_instruction(self, user_instruction, current_plan_dict):
+        """
+        Analyzes the user's instruction to determine if external knowledge retrieval is needed.
+        """
+        print(f"🧠 Editor: Analyzing if instruction needs external knowledge...")
+        prompt = f"""
+        Analyze the user's instruction to modify the following system architecture.
+        
+        ## Current Plan
+        {json.dumps(current_plan_dict, indent=2)}
+        
+        ## User Instruction
+        {user_instruction}
+        
+        ## Task
+        Determine if the user's instruction requires external domain knowledge (e.g., adding new interactive features, clarifying complex processes, integrating new technologies).
+        If the instruction is just a simple renaming, deletion, or basic rewiring, retrieval is NOT needed.
+        If the instruction requires specific technical implementation details or structural inspiration, extract 1-3 highly descriptive keyword phrases to search for in a research database.
+        
+        ## Output Format (JSON only)
+        {{
+            "needs_retrieval": true/false,
+            "search_queries": ["query1", "query2"] // Empty if needs_retrieval is false
+        }}
+        """
+        try:
+            response = self.client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.1,
+                response_format={"type": "json_object"}
+            ).choices[0].message.content
+            return json.loads(response)
+        except Exception as e:
+            print(f"Error analyzing instruction: {e}")
+            return {"needs_retrieval": False, "search_queries": []}
+
+    def revise_arch(self, current_plan, user_instruction, initial_query, additional_context=""):
+        """
+        Revises the current architecture based on user instructions.
+        
+        Args:
+            current_plan (str or dict): The current architecture plan (JSON).
+            user_instruction (str): User's modification or optimization instruction.
+            initial_query (str): The original user requirement.
+            
+        Returns:
+            dict: The revised architecture plan.
+        """
+        # Normalize current_plan to dict if it's a string
+        if isinstance(current_plan, str):
+            try:
+                current_plan_dict = json.loads(current_plan)
+            except json.JSONDecodeError:
+                print("Error: current_plan is not a valid JSON string.")
+                return current_plan
+        else:
+            current_plan_dict = current_plan
 
         prompt = f"""
-        You are a Mermaid code generator.
+        You are an expert system architect specializing in HCI systems. Your task is to modify the current system architecture based on the user's specific instruction. 
+        
+        ## Context
+        - **Original User Query**: {initial_query}
+        - **Current Architecture**: 
+          {json.dumps(current_plan_dict, indent=2)}
+        - **User Instruction**: {user_instruction}
+        
+        ## Additional Domain Knowledge (If provided)
+        {additional_context}
+        
         ## Task
-        Convert the given system architecture (JSON) into a standard Mermaid flowchart code.
+        Apply the user's instruction to make profound and structurally sound changes to the architecture. 
+        If "Additional Domain Knowledge" is provided, you MUST use it to deeply restructure the system flow and provide specific technical details (HOW it works), rather than just attaching a superficial empty node.
         
-        ## Input Architecture
-        {arch_plan}
+        ## Guidelines
+        1. **Locality**: Make only the changes that are directly related to the user's instruction. Do NOT alter parts of the architecture that are unrelated to the request.
+        2. **Preservation**: Maintain all existing modules and connections that are not specifically targeted by the user's instruction.
+        3. **Consistency**: Ensure the modified architecture remains consistent and coherent. Preserve the overall system flow and logic.
+        4. **Accuracy**: When adding or modifying modules, maintain correct naming, functionality, and interconnections.
+        5. **Integrity**: Ensure all 'source_mod' and 'target_mod' in ports refer to valid keys in 'module_details'.
+        
+        ## Example Instructions
+        - "Add a database to store user profiles" → Add a new module named "Database" with appropriate function, and connect it where relevant (e.g., to a "User Manager").
+        - "Make the system more secure" → Add security-related modules like "Authentication Module" or enhance existing modules with security functions.
+        - "Remove the notification system" → Delete modules related to notifications and update connections accordingly.
+        
+        ## Output Format
+        Return the full updated architecture in the same JSON structure as the input, including all unchanged parts:
+        {{
+            "overall_description": "...",
+            "module_details": [
+                {{
+                    "name": "...",
+                    "brief_description": "A one-short-sentence concise explanation of the module's core functional role.",
+                    "function": "Detailed explanation of the module's function, its core responsibilities, and its crucial role and importance within the overall system architecture.",
+                    "technical_methods": "Detailed description of the specific algorithms, models, or technical methods used, including HOW they process data and why they are selected.",
+                    "role": "choose from [\"input\", \"output\", \"processing\", \"data\"]",
+                    "references": "...",
+                    "sub_nodes": [...],
+                    "ports": {{
+                        "incoming": [...],
+                        "outgoing": [...],
+                        "internal_flow": [...]
+                    }}
+                }},
+                ...
+            ]
+        }}
+        """
 
-        ## Mapping Rules
-        1. arch_plan["module_details"] -> nodes
-            - Nodes are only represented by their ids and names, without any other information appearing in the diagram (including functions, technical methods, and references).
-        2. arch_plan["module_details"]["sub_nodes"] -> subnodes (if any) 
-            - Use subgraphs to represent modules if there are more than one subnodes and data flow between them in a single module. 
-            - DO NOT use subgraphs if there is only one node and the name of the node is the same as the module name.
-            - Use connection lines to represent the data flow sequence of subnodes within a module.
-        3. arch_plan["module_details"]["ports"] -> edges
-            - "target_mod" and "source_mod" represent the module id.
-            - "target_node" and "source_node" represent the node id (within the target module and source module respectively).
-            - "connects_to_internal_node" and "originates_from_internal_node" represent the subnode id (within the target module and source module respectively).
-            - "edge_label" represents the label of the edge. 
-        4. arch_plan["module_details"]["ports"]["internal_flow"] -> internal edges (if any)
-        DO NOT add any extra nodes or edges!
-        
-        ## Drawing Rules
-        1. Use 'graph TD' (top-down) layout.
-        2. For EDGES:
-            - Put descriptive text ON THE EDGE, not inside the node name.
-            - Format: `NodeA -->|description| NodeB`
-            - Do NOT change the node ID or Label to include the description.
-        3. Avoid Errors:
-            - Always enclose the labels with double quatation marks.
-            - DO NOT include style attributes.
-            - NO 'click' events or 'class' identification.
-            - The **subgraph** has been correctly defined and an end marker "end" has been added.
-        4. Output Format:
-           - Return a JSON object with a single key "mermaid_code".
-           - The value should be the pure Mermaid code string.
-           - Example: {{ "mermaid_code": "graph TD\\n..." }}
-    """
-        try: 
+        try:
             response = self.client.chat.completions.create(
-                # model="qwen3-vl-plus",
-                model = "gpt-4o-2024-11-20",
+                model="gpt-4o-2024-11-20",
                 messages=[{"role": "user", "content": prompt}],
-                temperature=0,
+                temperature=0.1,
                 response_format={"type": "json_object"},
             ).choices[0].message.content
-            raw_code = json.loads(response)["mermaid_code"]
-            clean_code = self.clean_mermaid_code(raw_code)
-            return clean_code
-        except Exception as e:
-            print(f"Error: {e}")
-            return "graph TD\nError[Generation Failed]"
-        
-    def clean_mermaid_code(self,code):
-        """
-        清理Mermaid代码中的转义字符
-        """
-        # 1. 尝试提取代码块
-        if '```mermaid' in code:
-            pattern = r"```mermaid\s*(.*?)\s*```"
-            match = re.search(pattern, code, re.DOTALL)
-            if match:
-                code = match.group(1)
-        elif '```' in code:
-            pattern = r"```\s*(.*?)\s*```"
-            match = re.search(pattern, code, re.DOTALL)
-            if match:
-                code = match.group(1)
-
-        # 2. 替换常见转义问题
-        code = code.replace('\\n', '\n')
-        code = code.replace('\\"', '"')
-        
-        # 3. 去除首尾空白
-        code = code.strip()
-        
-        # 4. 去除可能残留的引号（如果整个代码被包裹在引号中）
-        if code.startswith('"') and code.endswith('"'):
-            code = code[1:-1]
-            code = code.strip()
-
-        return code
             
+            # print(response)
+            return response
+        except Exception as e:
+            print(f"Error in revising architecture: {e}")
+            return current_plan
+
 class ConflictSolver:
     def __init__(self):
         pass
@@ -1180,10 +1186,10 @@ if __name__ == "__main__":
     vector_store, graph_store = load_stores()
     planner = PlannerAgent(client, graph_store)
     user_query = "Design an LLM-based code education system for children"
-    arch_plan = planner.extract_arch(user_query)
+    base_anchors = []
     divergent_plans = planner.divergent_planning(
             user_query=user_query,
-            base_anchors=arch_plan.get("anchors", []),
+            base_anchors=base_anchors,
             num_outputs=1
     )
     print(divergent_plans)

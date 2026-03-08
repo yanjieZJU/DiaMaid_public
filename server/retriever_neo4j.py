@@ -2,7 +2,7 @@ import os
 import httpx
 import json
 import sys
-import os
+import time
 from llama_index.core import StorageContext
 from llama_index.core.schema import TextNode, NodeWithScore
 from llama_index.llms.openai import OpenAI
@@ -10,6 +10,7 @@ from llama_index.embeddings.openai import OpenAIEmbedding
 from llama_index.graph_stores.neo4j import Neo4jPropertyGraphStore
 from llama_index.core.vector_stores import SimpleVectorStore, VectorStoreQuery
 from llama_index.core.vector_stores import MetadataFilters, ExactMatchFilter
+from neo4j.exceptions import ServiceUnavailable, SessionExpired, TransientError
 
 # Add parent directory to path for config import
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -22,6 +23,29 @@ llm = OpenAI(model="gpt-4o", http_client=http_client)
 
 STORAGE_DIR = "./server/graph_storage"
 
+# --- Globals for caching stores ---
+_GLOBAL_VECTOR_STORE = None
+_GLOBAL_GRAPH_STORE = None
+_GLOBAL_EMBED_MODEL = None
+
+def get_embed_model():
+    global _GLOBAL_EMBED_MODEL
+    if _GLOBAL_EMBED_MODEL is None:
+        _GLOBAL_EMBED_MODEL = OpenAIEmbedding(
+            model_name="text-embedding-3-small",
+            api_key=os.environ.get("OPENAI_API_KEY"),
+            api_base=os.environ.get("OPENAI_BASE_URL")
+        )
+    return _GLOBAL_EMBED_MODEL
+
+def get_global_stores():
+    global _GLOBAL_VECTOR_STORE, _GLOBAL_GRAPH_STORE
+    
+    if _GLOBAL_VECTOR_STORE is None or _GLOBAL_GRAPH_STORE is None:
+        print("Initializing Global Stores for the first time...")
+        _GLOBAL_VECTOR_STORE, _GLOBAL_GRAPH_STORE = load_stores()
+    
+    return _GLOBAL_VECTOR_STORE, _GLOBAL_GRAPH_STORE
 
 def load_stores():
     print("Connecting to Stores...")
@@ -38,13 +62,37 @@ def load_stores():
         exit(1)
     return vector_store, graph_store
 
+def run_with_retry(func, *args, max_retries=3, initial_delay=1, **kwargs):
+    """
+    Executes a function with retry logic for transient Neo4j errors.
+    """
+    delay = initial_delay
+    last_exception = None
+    
+    for attempt in range(max_retries):
+        try:
+            return func(*args, **kwargs)
+        except (ServiceUnavailable, SessionExpired, TransientError) as e:
+            last_exception = e
+            print(f"⚠️ Neo4j Connection Error (Attempt {attempt + 1}/{max_retries}): {e}")
+            if attempt < max_retries - 1:
+                time.sleep(delay)
+                delay *= 2  # Exponential backoff
+        except Exception as e:
+            # For other exceptions, re-raise immediately
+            raise e
+            
+    print(f"❌ Failed after {max_retries} attempts.")
+    raise last_exception
+
+def execute_read_with_session(driver, func, *args, **kwargs):
+    """Safely execute a read transaction and immediately close the session."""
+    with driver.session() as session:
+        return session.execute_read(func, *args, **kwargs)
+
 def custom_retrieve(query_text, vector_store, graph_store, top_k, node_type=None, role_filter=None, community_id=None):
     print(f"\n🔍 Executing Custom Retrieval for: '{query_text}'")
-    embed_model = OpenAIEmbedding(
-        model_name="text-embedding-3-small",
-        api_key=os.environ.get("OPENAI_API_KEY"),
-        api_base=os.environ.get("OPENAI_BASE_URL")
-    )
+    embed_model = get_embed_model()
     query_embedding = embed_model.get_query_embedding(query_text)
     
     found_ids = []
@@ -64,9 +112,10 @@ def custom_retrieve(query_text, vector_store, graph_store, top_k, node_type=None
             result = tx.run(cypher, comm_id=comm_id, role_filter=role_filter)
             return [r["id"] for r in result]
 
-        with graph_store._driver.session() as session:
-            # Fetch all candidate IDs in this community
-            candidate_ids = session.execute_read(_fetch_community_candidates, community_id, role_filter)
+        # Use retry logic for database access with proper session closing
+        candidate_ids = run_with_retry(
+            lambda: execute_read_with_session(graph_store._driver, _fetch_community_candidates, community_id, role_filter)
+        )
             
         print(f"      Found {len(candidate_ids)} candidates in graph.")
         
@@ -150,16 +199,19 @@ def custom_retrieve(query_text, vector_store, graph_store, top_k, node_type=None
         """
         return tx.run(cypher, id=node_id, role_filter=role_filter, skip_role_check=skip_role).single()
 
-    with graph_store._driver.session() as session:
-        for node_id, score in zip(found_ids, found_scores):
-            # Stop if we have enough
-            if len(retrieved_nodes) >= top_k:
-                break
-            
-            # specific role check skip if we already filtered via community query
-            skip_role = True if community_id else False
-            
-            result = session.execute_read(_fetch_node_details, node_id, role_filter, skip_role)
+    for node_id, score in zip(found_ids, found_scores):
+        # Stop if we have enough
+        if len(retrieved_nodes) >= top_k:
+            break
+        
+        # specific role check skip if we already filtered via community query
+        skip_role = True if community_id else False
+        
+        try:
+            # Use retry logic for database access with proper session closing
+            result = run_with_retry(
+                lambda: execute_read_with_session(graph_store._driver, _fetch_node_details, node_id, role_filter, skip_role)
+            )
             
             if result:
                 center_node = result["center"]
@@ -183,8 +235,9 @@ def custom_retrieve(query_text, vector_store, graph_store, top_k, node_type=None
 
                 retrieved_nodes.append(NodeWithScore(node=node, score=score))
 
-            else:
-                 pass # Already handled or filtered
+        except Exception as e:
+            print(f"⚠️ Failed to fetch details for node {node_id}: {e}")
+            continue
 
     return retrieved_nodes
 
@@ -207,13 +260,19 @@ def get_all_community_summaries(vector_store, graph_store):
         result = tx.run(cypher)
         return [f"[Community ID: {record['id']}]: {record['summary']}" for record in result]
 
-    with graph_store._driver.session() as session:
-        summaries = session.execute_read(_fetch_summaries)
+    try:
+        summaries = run_with_retry(
+            lambda: execute_read_with_session(graph_store._driver, _fetch_summaries)
+        )
+    except Exception as e:
+        print(f"⚠️ Failed to fetch community summaries: {e}")
+        return ""
+
     return "\n".join(summaries)
 
 def retrieve_and_get_content(query, vector_store, graph_store, top_k=5, node_type=None, role_filter=None, community_id=None, include_topology=True):
     if vector_store is None or graph_store is None:
-        vector_store, graph_store = load_stores()
+        vector_store, graph_store = get_global_stores()
 
     retrieved_nodes = custom_retrieve(query, vector_store, graph_store, top_k, node_type, role_filter, community_id)
 
@@ -307,43 +366,49 @@ def find_structural_path(source_text, target_text, vector_store, graph_store, re
             result = tx.run(cypher, src_ids=src_ids, tgt_ids=tgt_ids)
             return list(result)
 
-        with graph_store._driver.session() as session:
-            records = session.execute_read(_find_paths, src_ids, tgt_ids)
-            unique_signatures = set()
+        try:
+            records = run_with_retry(
+                lambda: execute_read_with_session(graph_store._driver, _find_paths, src_ids, tgt_ids)
+            )
+        except Exception as e:
+            print(f"⚠️ Failed to find paths: {e}")
+            return []
+
+        unique_signatures = set()
+        
+        for record in records:
+            path_nodes = record["path_nodes"]
+            relations = record["relations"]
+                
+            # Generate a signature based on the actual data flow structure
+            # This dedups paths that only differ by their entry point (via HAS_ROLE)
+            flow_signature_parts = []
+            for i, rel in enumerate(relations):
+                if rel == "FLOWS_TO":
+                        flow_signature_parts.append(f"{path_nodes[i]['name']}->{path_nodes[i+1]['name']}")
             
-            for record in records:
-                path_nodes = record["path_nodes"]
-                relations = record["relations"]
-                
-                # Generate a signature based on the actual data flow structure
-                # This dedups paths that only differ by their entry point (via HAS_ROLE)
-                flow_signature_parts = []
-                for i, rel in enumerate(relations):
-                    if rel == "FLOWS_TO":
-                         flow_signature_parts.append(f"{path_nodes[i]['name']}->{path_nodes[i+1]['name']}")
-                
-                signature = "|".join(flow_signature_parts)
-                # If no flows_to (shouldn't happen due to WHERE), skip this path
-                if not signature:
-                    continue
-                if signature in unique_signatures:
-                    continue
-                unique_signatures.add(signature)
-                
-                if len(found_paths) >= 3:
-                    break
+            signature = "|".join(flow_signature_parts)
+            # If no flows_to (shouldn't happen due to WHERE), skip this path
+            if not signature:
+                continue
+            if signature in unique_signatures:
+                continue
+            unique_signatures.add(signature)
+            
+            if len(found_paths) >= 3:
+                break
 
-                path_data = {
-                    "source_query": source_text,
-                    "target_query": target_text,
-                    "path_nodes": record["path_nodes"],
-                    "relations": record["relations"],
-                    "rel_props": record["rel_props"]
-                }
-                found_paths.append(path_data)
+            path_data = {
+                "source_query": source_text,
+                "target_query": target_text,
+                "path_nodes": record["path_nodes"],
+                "relations": record["relations"],
+                "rel_props": record["rel_props"]
+            }
+            found_paths.append(path_data)
 
-                node_names = "-> ".join([node["name"] for node in record["path_nodes"]])
-                print(f"   ✅ Path found: {node_names}")
+            node_names = "-> ".join([node["name"] for node in record["path_nodes"]])
+            print(f"   ✅ Path found: {node_names}")
 
     
     return found_paths

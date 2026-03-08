@@ -25,3 +25,9 @@ clustering_verification_results.json
 show_clustering_results.py
 server/kg_cluster/
 evaluation/
+
+# Database
+server/diamaid.db
+
+# Other untracked local logs
+*.log

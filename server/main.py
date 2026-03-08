@@ -6,12 +6,12 @@ from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 from openai import OpenAI
 import uvicorn
-# from agents import run_pipeline # Removed
-from pipeline_runner import run_pipeline # Updated Import
+from pipeline_runner import run_pipeline, run_edit_pipeline # Updated Import
 import sys
 # Add parent directory to path for config import
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import *
+from exporter import export_to_docx
 
 app = FastAPI()
 
@@ -32,11 +32,35 @@ app.add_middleware(
 # --- LLM Client Setting ---
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"), base_url=os.getenv("OPENAI_BASE_URL"))
 
+from typing import Optional # Add Optional
+
 # --- 3. 定义请求数据格式 ---
+class AnchorDef(BaseModel):
+    user_term: str
+    description: str = ""
+    role: str = ""
+
+class RelationDef(BaseModel):
+    source: str
+    target: str
+    type: str = "FLOWS_TO"
+
 class GenRequest(BaseModel):
     prompt: str          # 用户的总体描述
-    userNodes: list[str] # 用户定义的节点列表 (现在可能包含更复杂的描述字符串)
-    allowRandomNodes: bool = False # 是否允许生成随机节点 (深度生成模式)
+    anchors: list[AnchorDef] = []
+    relations: list[RelationDef] = []
+    userNodes: list[str] = [] # 用户定义的纯文本节点列表 (作为后续预留或旧版本兼容)
+    allowRandomNodes: bool = False # 是否允许生成随机节点
+
+class EditRequest(BaseModel):
+    plan_id: Optional[str] = None # Added plan_id
+    current_plan: dict
+    instruction: str
+    original_query: str
+
+class ExportRequest(BaseModel):
+    image: str # Base64 encoded image string
+    plan: dict # Module details json
 
 # --- 4. 核心接口 ---
 @app.post("/generate")
@@ -46,63 +70,68 @@ async def generate_mermaid(req: GenRequest):
     if req.userNodes:
         print(f"节点示例: {req.userNodes[:3]}...")
     
-    # 构造 Prompt
-    # 技巧：强制要求 LLM 返回纯文本，不要 markdown 格式
-    system_prompt = """
-    你是一个 Mermaid 流程图专家。
-    任务：根据用户的描述和提供的节点列表，生成 Mermaid 代码。
+    print(f"Calling streaming run_pipeline with:")
+    print(f"    user query: {req.prompt}")
+    print(f"    Anchors: {len(req.anchors)}")
+    print(f"    Relations: {len(req.relations)}")
     
-    输入说明：
-    用户提供的节点列表 (Nodes should be included) 可能包含以下几种格式：
-    1. 纯节点名称： "NodeA"
-    2. 连线关系： "NodeA --> NodeB"
-    3. 包含关系： "ParentNode contains ChildNode"
-    
-    要求：
-    1. 必须包含用户提供的所有节点文本。
-    2. 必须严格遵守用户定义的连线关系（如 A --> B）。
-    3. 必须严格遵守用户定义的包含关系（使用 subgraph）。
-       例如：如果输入 "GroupA contains NodeB"，则生成的 Mermaid 代码应类似：
-       subgraph GroupA
-         NodeB
-       end
-    4. [CRITICAL] 节点生成约束：
-       - 如果 allowRandomNodes 为 False (默认)：生成的流程图中只能包含 'userNodes' 中的节点，严禁添加任何额外的、用户未指定的节点。
-       - 如果 allowRandomNodes 为 True (深度生成)：你可以在保留所有 'userNodes' 的基础上，根据 'user query' 的语境，智能添加必要的中间节点或辅助模块，以完善系统逻辑。
-    5. 根据逻辑合理连接节点。
-    6. [CRITICAL] 连线文字规范：
-       - 严禁将连线说明（如“数据流”、“控制信号”）作为节点名称的一部分。
-       - 连线说明必须放在 Mermaid 的连线语法中，例如 `A -->|说明文字| B`。
-       - 节点名称必须保持简洁，只包含实体名（如 "User", "Server"），不要包含动作描述。
-       - 如果用户在 prompt 中明确要求修改或隐藏连线文字，请遵照执行。
-    7. 只返回 Mermaid 代码字符串，不要包含 ```mermaid 或 ``` 这样的 Markdown 标记。
-    8. 默认使用 graph TD (从上到下) 布局。
-    """
-
-    user_message = f"""
-    user query: {req.prompt}
-    Nodes and Relations strictly required: 
-    {json.dumps(req.userNodes, indent=2, ensure_ascii=False)}
-    Allow Random/Extra Nodes: {req.allowRandomNodes}
-    """
-    
-    # 注意：这里的 system_prompt 其实是在 main.py 里定义的，但实际上我们调用的是 run_pipeline
-    # run_pipeline 内部有自己的 prompt 逻辑 (在 agents.py 中)
-    # 我们需要把 allowRandomNodes 参数传递给 run_pipeline
-    
-    print(f"Calling streaming run_pipeline with: {user_message}")
+    anchors_list = [a.model_dump() for a in req.anchors]
+    relations_list = [r.model_dump() for r in req.relations]
     
     # 使用 StreamingResponse, media_type设为 ndjson 方便前端按行解析
     def event_generator():
         try:
             # 修改 num_outputs 增加生成方案数量，以流式逐步返回
-            for chunk in run_pipeline(user_message, num_outputs=1, divergence=True):
+            for chunk in run_pipeline(
+                user_query=req.prompt,
+                base_anchors=anchors_list,
+                user_relations=relations_list,
+                num_outputs=3, 
+                divergence=True
+            ):
                 yield chunk
         except Exception as e:
             print(f"Pipeline error: {e}")
             yield json.dumps({"type": "error", "message": str(e)}) + "\n"
 
     return StreamingResponse(event_generator(), media_type="application/x-ndjson")
+
+@app.post("/edit")
+async def edit_architecture(req: EditRequest):
+    print(f"收到修改请求: 指令={req.instruction}, PlanID={req.plan_id}")
+    
+    def event_generator():
+        try:
+            # 使用 run_edit_pipeline 处理修改
+            for chunk in run_edit_pipeline(
+                plan_id=req.plan_id,
+                current_plan_json=req.current_plan,
+                user_instruction=req.instruction,
+                original_query=req.original_query
+            ):
+                yield chunk
+        except Exception as e:
+            print(f"Edit Pipeline error: {e}")
+            yield json.dumps({"type": "error", "message": str(e)}) + "\n"
+
+    return StreamingResponse(event_generator(), media_type="application/x-ndjson")
+
+@app.post("/export")
+async def export_document(req: ExportRequest):
+    print("Received request to export docx.")
+    try:
+        doc_stream = export_to_docx(image_b64=req.image, node_details=req.plan)
+        headers = {
+            'Content-Disposition': 'attachment; filename="architecture_plan.docx"'
+        }
+        return StreamingResponse(
+            doc_stream, 
+            headers=headers,
+            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        )
+    except Exception as e:
+        print(f"Error exporting Docx: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
     import uvicorn

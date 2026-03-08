@@ -1,5 +1,6 @@
-import React, { useEffect, useState } from 'react';
-import ReactFlow, { Background, Controls, MarkerType, useNodesState, useEdgesState } from 'reactflow';
+import React, { useEffect, useState, useImperativeHandle, forwardRef } from 'react';
+import ReactFlow, { Background, Controls, MarkerType, useNodesState, useEdgesState, ReactFlowProvider, getRectOfNodes, getTransformForBounds, useReactFlow } from 'reactflow';
+import { toPng } from 'html-to-image';
 import dagre from 'dagre';
 import 'reactflow/dist/style.css';
 
@@ -109,9 +110,40 @@ const getLayoutedElements = (nodes, edges, direction = 'TB') => {
     return { nodes: layoutedNodes, edges };
 };
 
-export default function ResultFlowViewer({ nodeDetails, onNodeClick }) {
+const ResultFlowComponent = forwardRef(({ nodeDetails, onNodeClick }, ref) => {
     const [nodes, setNodes, onNodesChange] = useNodesState([]);
     const [edges, setEdges, onEdgesChange] = useEdgesState([]);
+    const { getNodes } = useReactFlow();
+
+    useImperativeHandle(ref, () => ({
+        exportImage: async () => {
+            const currentNodes = getNodes();
+            if (currentNodes.length === 0) throw new Error("No nodes to export");
+
+            // Calculate bounds
+            const nodesBounds = getRectOfNodes(currentNodes);
+            // Add padding
+            const imageWidth = nodesBounds.width + 100;
+            const imageHeight = nodesBounds.height + 100;
+
+            // Make sure the image is somewhat readable by limiting scale constraints internally
+            const transform = getTransformForBounds(nodesBounds, imageWidth, imageHeight, 0.2, 2);
+
+            const viewport = document.querySelector('.mermaid-wrapper .react-flow__viewport');
+            if (!viewport) throw new Error("Viewport not found");
+
+            return await toPng(viewport, {
+                backgroundColor: '#ffffff',
+                width: imageWidth,
+                height: imageHeight,
+                style: {
+                    width: `${imageWidth}px`,
+                    height: `${imageHeight}px`,
+                    transform: `translate(${transform[0]}px, ${transform[1]}px) scale(${transform[2]})`,
+                },
+            });
+        }
+    }));
 
     useEffect(() => {
         if (!nodeDetails || Object.keys(nodeDetails).length === 0) {
@@ -151,6 +183,11 @@ export default function ResultFlowViewer({ nodeDetails, onNodeClick }) {
                         label: (
                             <div style={{ fontWeight: 'bold', fontSize: '14px', paddingTop: '5px' }}>
                                 {mod.name || modName}
+                                {mod.brief_description && (
+                                    <div style={{ fontSize: '11px', color: '#666', marginTop: '4px', fontWeight: 'normal', padding: '0 10px', lineHeight: '1.2', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden', display: '-webkit-box' }}>
+                                        {mod.brief_description}
+                                    </div>
+                                )}
                             </div>
                         )
                     },
@@ -197,7 +234,18 @@ export default function ResultFlowViewer({ nodeDetails, onNodeClick }) {
                 // Single node module
                 nextNodes.push({
                     id: modName,
-                    data: { label: mod.name || modName },
+                    data: {
+                        label: (
+                            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
+                                <div style={{ fontWeight: 'bold', fontSize: '13px' }}>{mod.name || modName}</div>
+                                {mod.brief_description && (
+                                    <div style={{ fontSize: '10px', color: '#555', marginTop: '4px', lineHeight: '1.2', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden', display: '-webkit-box', fontWeight: 'normal' }}>
+                                        {mod.brief_description}
+                                    </div>
+                                )}
+                            </div>
+                        )
+                    },
                     position: { x: 0, y: 0 },
                     style: {
                         width: nodeWidth,
@@ -205,8 +253,8 @@ export default function ResultFlowViewer({ nodeDetails, onNodeClick }) {
                         display: 'flex',
                         alignItems: 'center',
                         justifyContent: 'center',
-                        backgroundColor: '#e6f7ff',
-                        border: '1px solid #1890ff',
+                        backgroundColor: 'rgba(33, 124, 243, 0.05)',
+                        border: '2px solid #217cf3',
                         borderRadius: '4px',
                         fontSize: '13px',
                         padding: '10px',
@@ -304,4 +352,12 @@ export default function ResultFlowViewer({ nodeDetails, onNodeClick }) {
             <Controls />
         </ReactFlow>
     );
-}
+});
+
+export default forwardRef(function ResultFlowViewer(props, ref) {
+    return (
+        <ReactFlowProvider>
+            <ResultFlowComponent {...props} ref={ref} />
+        </ReactFlowProvider>
+    );
+});
