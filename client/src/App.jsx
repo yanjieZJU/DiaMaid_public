@@ -21,6 +21,7 @@ const initialEdges = [];
 
 function App() {
   const [description, setDescription] = useState('');
+  const [sessionId, setSessionId] = useState(''); // Added session ID
 
   // 使用 React Flow 的 hook 管理状态
   const [nodes, setNodes, onNodesChange] = useNodesState(initialNodes);
@@ -68,7 +69,20 @@ function App() {
       } else {
         details = json;
       }
-      setPlans([{ perspective: '快速测试版', description: json.overall_description || '测试生成的方案', node_details: details }]);
+
+      // 创建完整的计划对象，包括必要的字段
+      const testPlan = {
+        perspective: json.perspective || '快速测试版',
+        description: json.overall_description || json.description || '测试生成的方案',
+        node_details: details,
+        mermaid_code: json.mermaid_code || '',
+        // 添加必要的字段以匹配正常的计划结构
+        plan_id: json.plan_id || `test-plan-${Date.now()}`,
+        history: json.history || [],
+        used_references: json.used_references || {}
+      };
+
+      setPlans([testPlan]);
       setActivePlanIndex(0);
       setNodeDetails(details);
       setViewMode('result');
@@ -515,6 +529,7 @@ function App() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
+          session_id: sessionId.trim() || undefined,
           prompt: description,
           anchors: anchorsPayload,
           relations: relationsPayload
@@ -588,13 +603,14 @@ function App() {
     // Store user message immediately
     const userMsg = { role: 'user', content: modificationInput, timestamp: Date.now() };
 
-    // Optimistically update UI to show user message
+    // Store user message immediately and update the CURRENT branch/tab
     setPlans(prevPlans => {
       const updated = [...prevPlans];
       const current = updated[activePlanIndex];
       updated[activePlanIndex] = {
         ...current,
-        history: [...(current.history || []), userMsg]
+        history: [...(current.history || []), userMsg],
+        perspective: current.perspective.includes('(修改中...)') ? current.perspective : `${current.perspective} (修改中...)`
       };
       return updated;
     });
@@ -607,6 +623,7 @@ function App() {
       const currentPlan = plans[activePlanIndex];
       // Construct payload
       const payload = {
+        session_id: sessionId.trim() || undefined,
         plan_id: currentPlan.plan_id, // Pass plan_id
         current_plan: {
           module_details: currentPlan.node_details,
@@ -649,21 +666,19 @@ function App() {
 
               setPlans(prevPlans => {
                 const updatedPlans = [...prevPlans];
-                // Append modification history to perspective if needed, or just update
-                // For now, let's keep the perspective but mark as modified
-                let newPerspective = newPlanData.perspective;
-                if (!newPerspective.includes('(已修改)')) {
-                  newPerspective = `(已修改) ${currentPlan.perspective}`;
-                }
+                const targetIndex = activePlanIndex; // Update the active branch
+                const currentHistory = updatedPlans[targetIndex].history || [];
 
                 // Add system success message
-                const sysMsg = { role: 'system', content: `修改完成: ${data.plan_data.description ? data.plan_data.description.substring(0, 50) + '...' : '架构已更新'}`, timestamp: Date.now() };
-                const currentHistory = updatedPlans[activePlanIndex].history || [];
+                const sysMsg = { role: 'system', content: `修改完成: ${data.plan_data.description ? data.plan_data.description : '架构已更新'}`, timestamp: Date.now() };
 
-                updatedPlans[activePlanIndex] = {
+                // Remove "(修改中...)" from perspective
+                const updatedPerspective = updatedPlans[targetIndex].perspective.replace(' (修改中...)', '');
+
+                updatedPlans[targetIndex] = {
                   ...newPlanData,
-                  perspective: newPerspective,
-                  history: [...currentHistory, sysMsg]
+                  history: [...currentHistory, sysMsg],
+                  perspective: updatedPerspective // Cleaned
                 };
                 return updatedPlans;
               });
@@ -679,10 +694,14 @@ function App() {
               // Add error message to history
               setPlans(prevPlans => {
                 const updated = [...prevPlans];
-                const current = updated[activePlanIndex];
-                updated[activePlanIndex] = {
+                const targetIndex = activePlanIndex; // Update active branch
+                const current = updated[targetIndex];
+                const updatedPerspective = current.perspective.replace(' (修改中...)', '');
+
+                updated[targetIndex] = {
                   ...current,
-                  history: [...(current.history || []), { role: 'system', content: `Error: ${data.message}`, isError: true, timestamp: Date.now() }]
+                  history: [...(current.history || []), { role: 'system', content: `Error: ${data.message}`, isError: true, timestamp: Date.now() }],
+                  perspective: updatedPerspective
                 };
                 return updated;
               });
@@ -700,10 +719,14 @@ function App() {
       // Add error message to history
       setPlans(prevPlans => {
         const updated = [...prevPlans];
-        const current = updated[activePlanIndex];
-        updated[activePlanIndex] = {
+        const targetIndex = activePlanIndex; // Update active branch
+        const current = updated[targetIndex];
+        const updatedPerspective = current.perspective.replace(' (修改中...)', '');
+
+        updated[targetIndex] = {
           ...current,
-          history: [...(current.history || []), { role: 'system', content: `Request Error: ${error.message}`, isError: true, timestamp: Date.now() }]
+          history: [...(current.history || []), { role: 'system', content: `Request Error: ${error.message}`, isError: true, timestamp: Date.now() }],
+          perspective: updatedPerspective
         };
         return updated;
       });
@@ -795,7 +818,8 @@ function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           image: dataUrl,
-          plan: nodeDetails
+          plan: nodeDetails,
+          overall_description: currentPlan.description || ''
         })
       });
 
@@ -824,7 +848,7 @@ function App() {
   };
 
   return (
-    <div className="app-container" onClick={closeNodeDetails}>
+    <div className="app-container">
       <header>
         <h1>DiaMaid</h1>
       </header>
@@ -837,6 +861,16 @@ function App() {
 
             {/* 1. 需求 / 对话 面板 */}
             <div className="left-card" style={viewMode === 'result' ? { flex: '1 1 auto', display: 'flex', flexDirection: 'column' } : { flex: '0 0 auto' }}>
+              <div style={{ marginBottom: '10px' }}>
+                <input
+                  className="styled-input"
+                  placeholder="被试 ID"
+                  value={sessionId}
+                  onChange={(e) => setSessionId(e.target.value)}
+                  disabled={loading || plans.length > 0}
+                  style={{ marginBottom: '5px', height: '32px' }}
+                />
+              </div>
               <div className="card-title">{viewMode === 'result' ? '对话交互 (优化方案)' : '需求描述'}</div>
 
               {viewMode === 'result' && (
@@ -1161,6 +1195,7 @@ function App() {
                       ref={resultFlowRef}
                       nodeDetails={nodeDetails}
                       onNodeClick={handleMermaidNodeClick}
+                      onPaneClick={closeNodeDetails} // Newly passed prop
                     />
                   </div>
                 ) : (

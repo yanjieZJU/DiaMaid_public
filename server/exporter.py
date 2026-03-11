@@ -22,12 +22,12 @@ def add_table_row(table, key, value, bold_key=True):
 def set_col_widths(table, widths):
     for row in table.rows:
         for idx, width in enumerate(widths):
-            row.cells[idx].width = width
+            row.cells[idx].width = widths[idx]
 
-def export_to_docx(image_b64: str, node_details: dict) -> BytesIO:
+def export_to_docx(image_b64: str, node_details: dict, overall_description: str = None) -> BytesIO:
     """
-    Generate a Word document containing the architecture flowchart image and
-    detailed tables for each module.
+    Generate a Word document containing the architecture flowchart image,
+    overall description, and detailed tables for each module.
     """
     doc = Document()
     
@@ -40,6 +40,12 @@ def export_to_docx(image_b64: str, node_details: dict) -> BytesIO:
     # Title
     title = doc.add_heading("System Architecture Plan", level=0)
     title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+    # Overall Description
+    if overall_description:
+        doc.add_heading("Overall Description", level=1)
+        doc.add_paragraph(overall_description)
+        doc.add_paragraph("\n")
 
     # Add Flowchart Image
     doc.add_heading("1. Architecture Flowchart", level=1)

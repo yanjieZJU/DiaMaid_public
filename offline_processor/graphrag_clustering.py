@@ -80,8 +80,13 @@ class GraphClustering:
     def _check_role_compatibility(self, role_a, role_b):
         if not role_a or not role_b:
             return True
-        r1 = role_a.split(':')[1].strip().lower()
-        r2 = role_b.split(':')[1].strip().lower()
+            
+        def extract_role(r):
+            parts = r.split(':')
+            return parts[1].strip().lower() if len(parts) > 1 else r.strip().lower()
+            
+        r1 = extract_role(role_a)
+        r2 = extract_role(role_b)
         return r1 == r2
         
     def create_constrained_edges(self):
@@ -97,10 +102,11 @@ class GraphClustering:
         RETURN n.id as id, n.name as name, n.text as text, n.role as role
         """
         
+        def fetch_modules(tx):
+            return [dict(record) for record in tx.run(cypher)]
+            
         with self.graph_store._driver.session() as session:
-            result = session.run(cypher)
-            for record in result:
-                self.module_nodes.append(dict(record))
+            self.module_nodes = session.execute_read(fetch_modules)
         
         # 1.2 Get embeddings from vector store
         embedding_dict = self.vector_store._data.embedding_dict
@@ -144,23 +150,29 @@ class GraphClustering:
         
         print(f"   Prepared {len(edges_to_create)} edges for batch creation...")
         
+        def clear_edges(tx):
+            tx.run("MATCH ()-[r:SIMILAR_TO]-() DELETE r")
+            
+        def build_edges_batch(tx, batch_data):
+            cypher_query = """
+            UNWIND $edges as edge
+            MATCH (a:LlamaNode {id: edge.source})
+            MATCH (b:LlamaNode {id: edge.target})
+            MERGE (a)-[r:SIMILAR_TO]-(b)
+            SET r.weight = edge.weight
+            """
+            tx.run(cypher_query, edges=batch_data)
+
         with self.graph_store._driver.session() as session:
             # First, remove existing SIMILAR_TO edges to avoid duplicates
-            session.run("MATCH ()-[r:SIMILAR_TO]-() DELETE r")
+            session.execute_write(clear_edges)
             print("   Cleared existing SIMILAR_TO edges")
             
             # Batch create edges using UNWIND
             batch_size = 500
             for i in range(0, len(edges_to_create), batch_size):
                 batch = edges_to_create[i:i+batch_size]
-                cypher = """
-                UNWIND $edges as edge
-                MATCH (a:LlamaNode {id: edge.source})
-                MATCH (b:LlamaNode {id: edge.target})
-                MERGE (a)-[r:SIMILAR_TO]-(b)
-                SET r.weight = edge.weight
-                """
-                session.run(cypher, edges=batch)
+                session.execute_write(build_edges_batch, batch)
         return len(edges_to_create)
     
     def leiden_clustering(self):
@@ -184,9 +196,12 @@ class GraphClustering:
         RETURN a.id as source, b.id as target, r.weight as weight
         """
         
+        def fetch_edges(tx):
+            return [dict(record) for record in tx.run(cypher)]
+
         with self.graph_store._driver.session() as session:
-            result = session.run(cypher)
-            for record in result:
+            edges = session.execute_read(fetch_edges)
+            for record in edges:
                 G.add_edge(record['source'], record['target'], 
                           weight=record['weight'])
         
@@ -314,6 +329,7 @@ class GraphClustering:
         Output: ```
         The community collectively functions as physiological signal acquisition hardware, focusing on non-invasive monitoring of human bio-signals.
         Typical Inputs: Physical physiological states; Outputs: Raw analog or digitized time-series bio-data (EEG, EMG, GSR).
+        Innovative Highlights: Features advanced dry electrode systems enabling unconstrained setup compared to traditional wet electrodes.
         The assigned role: 'sensing_input:bio_sensor'
         ```
 
@@ -336,6 +352,7 @@ class GraphClustering:
         Output: ```
         The community collectively functions as a Multimodal Feature Extraction Engine, utilizing Deep Learning models (VGG16, BERT) to derive structured representations from unstructured raw data.
         Typical Inputs: Video streams, Text queries; Outputs: Discrete visual keyframes and symbolic intent labels.
+        Innovative Highlights: Employs cross-modal similarity analysis (VGG16 + IMU) to identify precise interaction moments instead of standard uniform sampling.
         The assigned role: 'processing_core: feature_extraction'
         ```
         """
@@ -366,8 +383,8 @@ class GraphClustering:
 
                         ## Task
                         Synthesize a **technical capability summary** that strictly follows the format and tone of the reference examples.
-                        The summary sentence should be 2-3 sentences max. Prioritize mechanisms.
-                        If the community contains mixed functionalities, focus on the DOMINANT capability but briefly mention the secondary auxiliary functions.
+                        The summary must be 3-4 sentences max.
+                        Crucially, you MUST include an "Innovative Highlights:" section. Look at the technical details of the modules and explicitly state any advanced, unconventional, or breakthrough methods that distinguish this community from basic/standard implementations. If nothing is highly innovative, describe the most complex technical feature.
 
                         ## Reference Examples
                         {few_shot_prompt}
@@ -444,6 +461,14 @@ class GraphClustering:
             update_data.append(props)
             
         with self.graph_store._driver.session() as session:
+            def remove_old(tx):
+                if remove_clauses:
+                    remove_str = ", ".join(remove_clauses)
+                    tx.run(f"MATCH (n:LlamaNode) REMOVE {remove_str}")
+                    
+            def set_batch(tx, cypher_query, batch_data):
+                tx.run(cypher_query, batch=batch_data)
+
             # 1. CLEANUP OLD ATTRIBUTES
             print("   🧹 Cleaning up old/stale hierarchy attributes...")
             max_level = len(self.hierarchy_map) - 1
@@ -455,9 +480,7 @@ class GraphClustering:
                 remove_clauses.append(f"n.community_L{l}")
                 remove_clauses.append(f"n.summary_L{l}")
             
-            if remove_clauses:
-                remove_str = ", ".join(remove_clauses)
-                session.run(f"MATCH (n:LlamaNode) REMOVE {remove_str}")
+            session.execute_write(remove_old)
 
             # 2. WRITE NEW ATTRIBUTES
             set_clauses = []
@@ -475,7 +498,7 @@ class GraphClustering:
                 MATCH (n:LlamaNode {{id: node.id}})
                 SET {set_clause_str}
                 """
-                session.run(cypher, batch=batch)
+                session.execute_write(set_batch, cypher, batch)
                 print(f"   Batch {i//batch_size + 1} written.")
 
         # 3. INDEX SUMMARIES INTO VECTOR STORE

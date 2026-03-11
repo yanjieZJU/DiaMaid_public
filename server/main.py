@@ -32,7 +32,7 @@ app.add_middleware(
 # --- LLM Client Setting ---
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"), base_url=os.getenv("OPENAI_BASE_URL"))
 
-from typing import Optional # Add Optional
+from typing import Optional, Union # Add Optional and Union
 
 # --- 3. 定义请求数据格式 ---
 class AnchorDef(BaseModel):
@@ -46,6 +46,7 @@ class RelationDef(BaseModel):
     type: str = "FLOWS_TO"
 
 class GenRequest(BaseModel):
+    session_id: Optional[str] = None # Added session_id
     prompt: str          # 用户的总体描述
     anchors: list[AnchorDef] = []
     relations: list[RelationDef] = []
@@ -53,14 +54,16 @@ class GenRequest(BaseModel):
     allowRandomNodes: bool = False # 是否允许生成随机节点
 
 class EditRequest(BaseModel):
-    plan_id: Optional[str] = None # Added plan_id
+    session_id: Optional[str] = None # Added session_id
+    plan_id: Optional[str] = None # Actually represents parent_node_id now
     current_plan: dict
     instruction: str
     original_query: str
 
 class ExportRequest(BaseModel):
     image: str # Base64 encoded image string
-    plan: dict # Module details json
+    plan: Union[dict, list] # Module details json
+    overall_description: Optional[str] = None
 
 # --- 4. 核心接口 ---
 @app.post("/generate")
@@ -86,8 +89,9 @@ async def generate_mermaid(req: GenRequest):
                 user_query=req.prompt,
                 base_anchors=anchors_list,
                 user_relations=relations_list,
-                num_outputs=3, 
-                divergence=True
+                num_outputs=1, 
+                divergence=True,
+                session_id=req.session_id # Pass session_id
             ):
                 yield chunk
         except Exception as e:
@@ -107,7 +111,8 @@ async def edit_architecture(req: EditRequest):
                 plan_id=req.plan_id,
                 current_plan_json=req.current_plan,
                 user_instruction=req.instruction,
-                original_query=req.original_query
+                original_query=req.original_query,
+                session_id=req.session_id # Pass session_id
             ):
                 yield chunk
         except Exception as e:

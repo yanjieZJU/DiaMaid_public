@@ -1,99 +1,84 @@
 # DiaMaid (Diagram Maid)
 
-**DiaMaid** is an intelligent, AI-powered system design assistant that transforms natural language descriptions and sparse node inputs into professional, comprehensive system architecture diagrams. By combining the power of Large Language Models (LLMs) with Graph RAG (Retrieval-Augmented Generation), DiaMaid helps developers and architects visualize complex systems effortlessly.
+**DiaMaid** 是一款智能驱动的系统设计与架构图助手。它能够将自然语言的系统描述和简单的节点约束，转化为专业、详尽的系统架构方案和架构图。通过结合大语言模型 (LLMs) 多智能体协同，DiaMaid 致力于帮助研究人员、开发者和架构师轻松推演复杂系统的可视化与方案设计。
 
-## 🌟 Key Features
+## 🌟 核心特性 (Key Features)
 
-### 1. Interactive & Synchronized Canvas
-- **React Flow Integration**: A fully interactive canvas where you can drag, drop, and connect nodes manually.
-- **Bi-directional Sync**: 
-  - Changes in the canvas (adding nodes, connecting lines) are understood by the backend.
-  - AI-generated Mermaid diagrams are automatically parsed and synchronized back to the interactive canvas.
-- **Smart Grouping**: Drag a node over another to create parent-child relationships automatically.
+### 1. 智能生成多视角方案 
+- **发散性规划 (Divergent Planning)**：只要输入一段大体的需求描述，后台多智能体会自动发散，提供多个不同技术侧重点的系统架构方案（以 Excel 工作表 Tab 形式呈现），全方位启发您的设计灵感。
+- **丰富的节点详情**：您设计的不仅仅是连线的图表。每个模块节点内都包含了：
+  - **核心功能 (Function)**
+  - **技术手段与实现细节 (Technical Methods)**
+  - **模块说明 (Brief Description)** 等重要结构化设计参考。
+  
+### 2. 交互式对话编辑与演进 (Agentic Editing)
+- **对话修改架构**：对当前生成的方案细节不满意？在左侧聊天栏直接输入修改指令（如“添加一个 Redis 缓存中心”或“将数据存储改为 MySQL”），AI 会基于当前所选方案进行局部逻辑更新，并生成一条新的方案分支。
+- **无缝回溯**：所有用户的修改指令和系统的更新结果均会产生完整的对话历史演进记录，方便您回顾过程和版本对比。
 
-### 2. Deep Generation Mode (深度生成)
-Unlock the full potential of AI with the **Deep Generation** toggle.
-- **Intelligent Completion**: Unlike standard tools that strictly follow inputs, DiaMaid can infer missing components (e.g., adding a Redis cache between API and DB, or a Message Queue for async tasks).
-- **Visual Distinction**: Auto-generated nodes appear in **Blue** to distinguish them from your manual inputs.
-- **User Control**: 
-  - **Retain**: One-click to accept AI suggestions and make them permanent.
-  - **Remove**: One-click to discard AI additions and revert to your original design.
+### 3. 直观的可视化工作区
+- **React Flow & Mermaid.js**：提供了直观的白板结构和详尽的自动排版流程图。右侧面板分为渲染图区和信息详情区。单击流程图内的任何节点即可在右下角查看该模块的详细参数。
+- **手动节点辅助**：支持在生成前，在左侧向画布中预置强行要求的核心基础节点，AI将确保将这些预设元素融合到最终生成的架构中。
+- **快速渲染测试**：提供独立的 JSON 免后端测试通道，粘贴合法的架构方案 JSON 即可直接渲染图表，方便研发调试。
 
-### 3. Rich Node Details
-Don't just look at boxes—understand them.
-- **Detail Inspector**: Click on any node (in the canvas or the preview image) to open the details panel.
-- **Deep Insights**: View the backend-generated metadata for each node, including:
-  - **Function**: What does this module actually do?
-  - **Technical Methods**: How is it implemented?
-  - **I/O Ports**: Explicit data flow definitions (what comes in, what goes out).
+### 4. 专业报告导出 (Export)
+- **一键导出 Word 文档**：在完成架构推演设计后，点击方案选项卡右上方的 **“导出为 Word”** 按钮。后台将自动为您排版生成一份专业`.docx`设计报告（内含当前的高清架构图图片、总体介绍以及各个模块属性细节表）。
 
-### 4. Optimized UI/UX
-- **Dynamic Progress**: Visual feedback during the generation process.
-- **Clean Controls**: Unified styling for input fields and action buttons.
-- **One-Click Clear**: Easily reset your workspace.
+## 🛠️ 技术栈 (Tech Stack)
 
-## 🛠️ Tech Stack
+- **前端 (Client)**：React, Vite, React Flow, Mermaid.js
+- **后端 (Server)**：Python, FastAPI, Pydantic, python-docx
+- **AI 与核心引擎**: 基于 OpenAI API 的底层多智能体协同管线 (Planner, Integrator, Editor, Reviewer 等)。
 
-- **Frontend**: React, React Flow, Mermaid.js, Vite
-- **Backend**: Python, FastAPI
-- **AI/Data**: LLM Agents (Planner, Retriever, Integrator, Drawer), Neo4j (Graph Storage)
+## 🚀 快速上手 (Getting Started)
 
-## 🚀 Getting Started
+### 前置要求 (Prerequisites)
+- [Node.js](https://nodejs.org/) (建议 v18 及以上)
+- [Python](https://www.python.org/) (建议 v3.10 及以上)
 
-### Prerequisites
-- Node.js (v18+)
-- Python (v3.10+)
-- Neo4j Database (for RAG features)
+### 安装与运行 (Installation)
 
-### Installation
-
-1. **Clone the repository**
+1. **获取代码**
    ```bash
    git clone https://github.com/mistymoonight/DiaMaid.git
    cd DiaMaid
    ```
 
-2. **Start the Backend Server**
+2. **启动后端服务 (Server)**
    ```bash
    cd server
-   # Install dependencies
+   # 推荐创建并激活您的虚拟环境，例如：python -m venv venv && source venv/bin/activate
    pip install -r requirements.txt
    
-   # Set up environment variables (Create a .env file if needed for API Keys)
-   # export OPENAI_API_KEY=...
-   # export NEO4J_URI=...
+   # 运行前请确保配置相应的环境变量 API 密钥 (可在代码端配置或使用 .env)
+   # export OPENAI_API_KEY="YOUR_API_KEY"
+   # export OPENAI_BASE_URL="YOUR_BASE_URL"
    
-   # Run the server
+   # 启动后端程序 (默认运行在 http://localhost:8000)
    python main.py
    ```
-   Server will run at `http://localhost:8000`.
 
-3. **Start the Frontend Client**
+3. **启动前端客户端 (Client)**
    ```bash
    cd client
-   # Install dependencies
+   # 安装 npm 依赖
    npm install
    
-   # Run the development server
+   # 运行 Vite 开发服务器
    npm run dev
    ```
-   Open `http://localhost:5173` in your browser.
+   启动成功后，即可在浏览器中访问 `http://localhost:5173`。
 
-## 📝 Usage Guide
+## 📝 基本使用流程 (Usage Guide)
 
-1. **Add Nodes**: Type a node name (e.g., "User", "Server") and press Enter or click "Add".
-2. **Describe Intent**: In the bottom text area, describe what you want to build (e.g., "A scalable e-commerce system").
-3. **Toggle Deep Generation**: Check "允许添加随机节点 (深度生成)" if you want the AI to brainstorm and add helper nodes.
-4. **Generate**: Click the "Generate" button.
-5. **Refine**: 
-   - Drag nodes to adjust layout.
-   - Click "Retain" (保留) to keep AI-generated nodes.
-   - Click nodes to view details.
+1. **输入基础信息**：在页面左侧，您可以填入“被试 ID”用于本地追踪数据日志。
+2. **初始化生成**：
+   - 在底部的大文本框中，输入您的核心系统需求（例如：“设计一个能够跨域监控的大型物联网数据处理系统架构”）。
+   - 点击 **“开始生成流程图”**，等待等待进度更新。
+3. **查看多方案**：生成完成之后，屏幕会切入全屏审阅模式。顶部的 Tab 可以切换不同技术解决思路的方案（例如方案A、方案B），右侧画布能直观审视对应的拓扑图。
+4. **对话式修正**：在当前最佳的方案下，可在左侧输入框继续与系统对话（例如提出“请把消息队列换为Kafka”），AI 会根据需求演化出下一代修改版图形。
+5. **归档与导出**：一切就绪后，点击 **“导出为 Word”** 即可直接获取设计文档。
 
-## 🤝 Contributing
+## 🤝 贡献与许可 (Contributing & License)
 
-Contributions are welcome! Please feel free to submit a Pull Request.
-
-## 📄 License
-
-[MIT](LICENSE)
+欢迎提交 issue 和 pull request 共同完善本项目。
+本项目采用 [MIT License](LICENSE) 开源协议。

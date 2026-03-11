@@ -15,9 +15,9 @@ from server.agents import (
     client
 )
 from server.retriever_neo4j import get_global_stores
-from server.database import create_plan, update_plan, add_history # Import DB functions
+from server.session_manager import create_initial_plan, create_modified_plan, get_session_tree, get_plan_lineage
 
-def run_pipeline(user_query, base_anchors, user_relations, num_outputs=1, divergence=True):
+def run_pipeline(user_query, base_anchors, user_relations, num_outputs=1, divergence=True, session_id=None):
     vector_store, graph_store = get_global_stores()
     planner = PlannerAgent(client, graph_store)
     retriever = RetrieverAgent(vector_store, graph_store, client)
@@ -171,17 +171,30 @@ def run_pipeline(user_query, base_anchors, user_relations, num_outputs=1, diverg
                 explorable_ref = ref_data.get("explorable", [])
                 
                 # Attach reference details directly to module_details
-                for mod_name, details in module_details.items():
-                    if mod_name in used_ref and used_ref[mod_name]:
-                        # Pass the first used reference object associated with the module
-                        first_ref = used_ref[mod_name][0]
-                        details["reference"] = {
-                            "name": first_ref.get("name", "Unknown"),
-                            "technical_details": first_ref.get("text", ""),
-                            "source": first_ref.get("source", "")
-                        }
-                    else:
-                        details["reference"] = None
+                if isinstance(module_details, list):
+                    for details in module_details:
+                        mod_name = details.get("name", "Unknown")
+                        if mod_name in used_ref and used_ref[mod_name]:
+                            first_ref = used_ref[mod_name][0]
+                            details["reference"] = {
+                                "name": first_ref.get("name", "Unknown"),
+                                "technical_details": first_ref.get("text", ""),
+                                "source": first_ref.get("source", "")
+                            }
+                        else:
+                            details["reference"] = None
+                else:
+                    for mod_name, details in module_details.items():
+                        if mod_name in used_ref and used_ref[mod_name]:
+                            # Pass the first used reference object associated with the module
+                            first_ref = used_ref[mod_name][0]
+                            details["reference"] = {
+                                "name": first_ref.get("name", "Unknown"),
+                                "technical_details": first_ref.get("text", ""),
+                                "source": first_ref.get("source", "")
+                            }
+                        else:
+                            details["reference"] = None
                         
             except:
                 module_details = {}
@@ -191,17 +204,18 @@ def run_pipeline(user_query, base_anchors, user_relations, num_outputs=1, diverg
 
             final_desc = raw_desc
 
-            # === Save to Database ===
+            # === Save to Session Tree ===
             try:
-                plan_id = create_plan(
+                plan_id = create_initial_plan(
+                    session_id=session_id,
                     original_query=full_query,
                     perspective=perspective,
                     description=final_desc,
                     arch_json=arch_json
                 )
-                print(f"✅ Plan saved to DB with ID: {plan_id}")
+                print(f"✅ Plan node saved to Session Tree with ID: {plan_id}")
             except Exception as e:
-                print(f"❌ Failed to save plan to DB: {e}")
+                print(f"❌ Failed to save plan to Session Tree: {e}")
                 plan_id = "error_saving_db"
                 
             plan_data = {
@@ -222,65 +236,66 @@ def run_pipeline(user_query, base_anchors, user_relations, num_outputs=1, diverg
 
     yield json.dumps({"type": "progress", "message": "所有方案生成完毕！", "percent": 100}) + "\n"
 
-def run_edit_pipeline(plan_id, current_plan_json, user_instruction, original_query):
+def run_edit_pipeline(plan_id, current_plan_json, user_instruction, original_query, session_id=None):
     # Initialize agents
     integrator = IntegratorAgent(client)
     solver = ConflictSolver()
     editor = EditorAgent(client)
     
-    # Save User Request
-    if plan_id:
-        try:
-            add_history(plan_id, "user", user_instruction)
-        except Exception as e:
-            print(f"Failed to save user history: {e}")
+    # Initialize retriever for tool use
+    vector_store, graph_store = get_global_stores()
+    retriever = RetrieverAgent(vector_store, graph_store, client)
 
-    yield json.dumps({"type": "progress", "message": "Analyzing modification request...", "percent": 10}) + "\n"
+    if plan_id:
+        print(f"User requested modification on parent node: {plan_id}")
+
+    # Get Lineage History
+    history_summary = []
+    if session_id and plan_id:
+        try:
+            lineage = get_plan_lineage(session_id, plan_id)
+            for i, node in enumerate(lineage):
+                role_desc = "Initial Plan" if i == 0 else "Modification"
+                
+                # Extract key info
+                instruction = node.get("user_instruction", "None (Base Plan)")
+                desc = node.get("description", "")
+                perspective = node.get("perspective", "")
+                
+                summary_entry = {
+                    "step": i,
+                    "type": role_desc,
+                    "perspective": perspective,
+                    "user_instruction": instruction,
+                    "result_description": desc
+                }
+                history_summary.append(summary_entry)
+                
+            print(f"📜 Constructed history summary with {len(history_summary)} steps.")
+        except Exception as e:
+            print(f"Warning: Could not load lineage for plan {plan_id}: {e}")
+
+    yield json.dumps({"type": "progress", "message": "Analyzing and modifying...", "percent": 20}) + "\n"
     
-    # 1. Analyze Instruction
-    analysis = editor.analyze_instruction(user_instruction, current_plan_json)
+    # Call Editor Agent (One-shot with tools)
+    edit_result = editor.edit_plan(current_plan_json, user_instruction, history_summary, retriever)
     
-    additional_context = ""
-    if analysis.get("needs_retrieval") and analysis.get("search_queries"):
-        yield json.dumps({"type": "progress", "message": "Retrieving domain knowledge for modification...", "percent": 20}) + "\n"
-        queries = analysis.get("search_queries")
-        print(f"🔍 Editor requested retrieval for: {queries}")
-        
-        # Initialize retriever
-        vector_store, graph_store = get_global_stores()
-        retriever = RetrieverAgent(vector_store, graph_store, client)
-        
-        # Format queries into fake anchors for the retrieval tool
-        search_anchors = [{"user_term": q, "description": "User requested enhancement"} for q in queries]
-        
-        # Retrieve
-        retrieved_map = retriever.retrieve_for_module(search_anchors, top_k=3, include_topology=True)
-        
-        # Format into string
-        context_parts = []
-        for term, nodes in retrieved_map.items():
-            context_parts.append(f"### Retrieved context for '{term}':")
-            for n in nodes:
-                context_parts.append(f"- Module Name: {n.node.metadata.get('name', 'Unknown')}")
-                context_parts.append(f"  Technical Info: {n.node.text}")
-                topo = n.node.metadata.get('topology', {})
-                if topo:
-                    up = [u['name'] for u in topo.get('upstream', [])]
-                    down = [d['name'] for d in topo.get('downstream', [])]
-                    context_parts.append(f"  Typical Topology: Preceded by {up}, Followed by {down}")
-        
-        additional_context = "\n".join(context_parts)
+    # Handle cases where edit_result might not be a dictionary (e.g., if JSON decoding failed inside editor)
+    if not isinstance(edit_result, dict) or not edit_result.get("revised_plan"):
+        yield json.dumps({"type": "error", "message": "Failed to generate modified plan structure."}) + "\n"
+        return
+
+    modified_arch_json = edit_result.get("revised_plan")
+    modification_intent = edit_result.get("modification_intent", "User modified plan")
+    thought_process = edit_result.get("thought", "")
     
-    # 2. Edit Architecture
-    yield json.dumps({"type": "progress", "message": "Applying changes...", "percent": 40}) + "\n"
-    
-    # current_plan_json is expected to be a dict or a json string.
-    # The EditorAgent handles string parsing.
-    
-    modified_arch_json_str = editor.revise_arch(current_plan_json, user_instruction, original_query, additional_context=additional_context)
+    print(f"✅ Editor Intent: {modification_intent}")
     
     # 2. Conflict Check & Refine Loop
-    current_arch_json = modified_arch_json_str
+    # Ensure we work with JSON string for consistency in prompt injection if needed, 
+    # but solver handles dicts. Integrator expects string representation in prompt.
+    current_arch_json = modified_arch_json
+    
     max_retries = 2
     
     for attempt in range(max_retries + 1):
@@ -296,7 +311,10 @@ def run_edit_pipeline(plan_id, current_plan_json, user_instruction, original_que
             print(f"⚠️ Conflict detected in modified arch:\n{report}")
             if attempt < max_retries:
                 # Request Fix
-                current_arch_json = integrator.refine_arch(original_query, current_arch_json, report)
+                # Convert dict to json string for the prompt
+                arch_str = json.dumps(current_arch_json, indent=2) if isinstance(current_arch_json, dict) else current_arch_json
+                current_arch_json = integrator.refine_arch(original_query, arch_str, report)
+                # refine_arch returns a string
             else:
                 print("❌ Max retries reached for modification.")
 
@@ -313,23 +331,50 @@ def run_edit_pipeline(plan_id, current_plan_json, user_instruction, original_que
             
             # Extract module details
             module_details = arch_json.get("module_details", {})
-            raw_desc = arch_json.get("overall_description", "")
+            # Ensure description is the overall description from the plan
+            final_desc = arch_json.get("overall_description", "Updated Architecture")
+
+            # Attach basic reference info if missing (Frontend might expect it)
+            if isinstance(module_details, list):
+                for details in module_details:
+                    if "reference" not in details:
+                        details["reference"] = None
+            else:
+                for mod_name, details in module_details.items():
+                    if "reference" not in details:
+                        details["reference"] = None
             
-            # Update Database
+            # Update Session Tree
+            # We don't overwrite, we create a new node
+            new_plan_id = plan_id # Fallback if we fail to create one
+            derived_perspective = "User Modified"
             if plan_id:
                 try:
-                    update_plan(plan_id, raw_desc, arch_json)
-                    add_history(plan_id, "system", f"修改完成: {raw_desc[:50]}...")
+                    # Include modification intent in the session tree node
+                    new_plan_id = create_modified_plan(
+                        session_id=session_id,
+                        parent_node_id=plan_id,
+                        user_instruction=f"{user_instruction} (Intent: {modification_intent})",
+                        original_query=original_query,
+                        modified_description=final_desc,
+                        modified_arch_json=arch_json
+                    )
+                    from server.session_manager import _load_session
+                    sess = _load_session(session_id if session_id else "anonymous_session")
+                    if new_plan_id in sess["nodes"]:
+                        derived_perspective = sess["nodes"][new_plan_id].get("perspective", "User Modified")
+                    print(f"✅ Modified plan saved to Session Tree as new node: {new_plan_id}")
                 except Exception as e:
-                    print(f"Failed to update plan in DB: {e}")
+                    print(f"Failed to save modified plan in Session Tree: {e}")
 
-            # Plan Data Structure
+            # Plan Data Structure mapping to new ID!
             plan_data = {
-                "plan_id": plan_id,
+                "plan_id": new_plan_id,
                 "option_id": "edited", 
-                "perspective": "User Modified",
+                "perspective": derived_perspective,
+                "modification_intent": modification_intent,
                 "mermaid_code": "graph TD\n  A[Result rendered directly from JSON using ReactFlow] --> B[No Mermaid needed!]",
-                "description": raw_desc,
+                "description": final_desc,
                 "node_details": module_details,
                 "used_references": {}, # References are not re-calculated here for now
                 "explorable_references": []

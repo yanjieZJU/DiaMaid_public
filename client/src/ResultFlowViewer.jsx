@@ -17,7 +17,7 @@ const getLayoutedElements = (nodes, edges, direction = 'TB') => {
     // 1. Add nodes to dagre
     nodes.forEach((node) => {
         if (node.isGroup) {
-            dagreGraph.setNode(node.id, { label: String(node.id), clusterLabelPos: 'top', paddingTop: 60, paddingBottom: 20, paddingLeft: 20, paddingRight: 20 });
+            dagreGraph.setNode(node.id, { label: String(node.id), clusterLabelPos: 'top', paddingTop: 200, paddingBottom: 20, paddingLeft: 20, paddingRight: 20 });
         } else {
             dagreGraph.setNode(node.id, { width: nodeWidth, height: nodeHeight });
             if (node.parentNode) {
@@ -77,15 +77,17 @@ const getLayoutedElements = (nodes, edges, direction = 'TB') => {
 
         if (node.isGroup) {
             // For groups, dagre center-aligns the bounding box, but ReactFlow sets top-left.
+            const yOffset = 60; // Add robust visual padding to the top of the group node
+
             newNode.position = {
                 x: nodeWithPosition.x - nodeWithPosition.width / 2,
-                y: nodeWithPosition.y - nodeWithPosition.height / 2,
+                y: (nodeWithPosition.y - nodeWithPosition.height / 2) - yOffset,
             };
             // We must explicitly set width and height for the parent to bound its children correctly
             newNode.style = {
                 ...newNode.style,
                 width: nodeWithPosition.width,
-                height: nodeWithPosition.height,
+                height: nodeWithPosition.height + yOffset,
             };
         } else {
             newNode.position = {
@@ -96,8 +98,11 @@ const getLayoutedElements = (nodes, edges, direction = 'TB') => {
             // If node has parent, coordinates in ReactFlow must be relative to parent.
             if (newNode.parentNode) {
                 const parentPos = dagreGraph.node(newNode.parentNode);
+                const yOffset = 60; // Must match the parent's yOffset
+
                 const parentX = parentPos.x - parentPos.width / 2;
-                const parentY = parentPos.y - parentPos.height / 2;
+                const parentY = (parentPos.y - parentPos.height / 2) - yOffset;
+
                 newNode.position.x -= parentX;
                 newNode.position.y -= parentY;
                 newNode.extent = 'parent';
@@ -110,7 +115,7 @@ const getLayoutedElements = (nodes, edges, direction = 'TB') => {
     return { nodes: layoutedNodes, edges };
 };
 
-const ResultFlowComponent = forwardRef(({ nodeDetails, onNodeClick }, ref) => {
+const ResultFlowComponent = forwardRef(({ nodeDetails, onNodeClick, onPaneClick }, ref) => {
     const [nodes, setNodes, onNodesChange] = useNodesState([]);
     const [edges, setEdges, onEdgesChange] = useEdgesState([]);
     const { getNodes } = useReactFlow();
@@ -344,6 +349,7 @@ const ResultFlowComponent = forwardRef(({ nodeDetails, onNodeClick }, ref) => {
                 // Determine original node name passed to onNodeClick
                 onNodeClick(node.id);
             }}
+            onPaneClick={onPaneClick}
             fitView
             attributionPosition="bottom-right"
             nodesDraggable={true}

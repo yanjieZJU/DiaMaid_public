@@ -8,6 +8,7 @@ from openai import OpenAI
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
 import concurrent.futures
+import hashlib
 
 # Add parent directory to path for config import
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -26,6 +27,37 @@ client = OpenAI(
     api_key=os.environ.get("OPENAI_API_KEY"),
     base_url=os.environ.get("OPENAI_BASE_URL")
     )
+
+# Global cache for cluster embeddings to avoid recomputation
+CLUSTER_EMBEDDINGS_CACHE = {}
+
+def get_cluster_embeddings_cache_key(cluster_data):
+    """Generate a cache key based on cluster data content."""
+    cluster_text = json.dumps(cluster_data, sort_keys=True)
+    return hashlib.md5(cluster_text.encode()).hexdigest()
+
+def load_cached_embeddings():
+    """Load cached embeddings from file if available."""
+    cache_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "kg_cluster", "embeddings_cache.json")
+    if os.path.exists(cache_file):
+        try:
+            with open(cache_file, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except:
+            pass
+    return {}
+
+def save_embeddings_cache(cache_data):
+    """Save embeddings cache to file."""
+    cache_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "kg_cluster", "embeddings_cache.json")
+    try:
+        with open(cache_file, 'w', encoding='utf-8') as f:
+            json.dump(cache_data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"Warning: Failed to save embeddings cache: {e}")
+
+# Load cache on module import
+CLUSTER_EMBEDDINGS_CACHE = load_cached_embeddings()
 
 TAXONOMY = """
 1. **sensing_input**
@@ -59,15 +91,35 @@ class PlannerAgent:
         
         clusters = self.topology_knowledge.get("scene_clusters", {})
         print(f"Pre-computing embeddings for {len(clusters)} clusters...")
+        
+        # Generate cache key for current topology knowledge
+        topology_hash = get_cluster_embeddings_cache_key(self.topology_knowledge)
+        
+        # Check if we have cached embeddings for this topology
+        if topology_hash in CLUSTER_EMBEDDINGS_CACHE:
+            print(f"✅ Using cached embeddings for topology {topology_hash[:8]}...")
+            self.cluster_embeddings = CLUSTER_EMBEDDINGS_CACHE[topology_hash]
+            return
+            
+        print(f"🔄 Computing new embeddings for topology {topology_hash[:8]}...")
+        
+        # Compute new embeddings
+        new_embeddings = {}
         for label, data in clusters.items():
             text = data.get("name", "")
             if text:
                 try:
                     resp = self.client.embeddings.create(input=text, model="text-embedding-3-small")
                     emb = resp.data[0].embedding
-                    self.cluster_embeddings[label] = emb
+                    new_embeddings[label] = emb
                 except Exception as e:
                     print(f"Error embedding cluster {label}: {e}")
+        
+        # Update cache
+        self.cluster_embeddings = new_embeddings
+        CLUSTER_EMBEDDINGS_CACHE[topology_hash] = new_embeddings
+        save_embeddings_cache(CLUSTER_EMBEDDINGS_CACHE)
+        print(f"💾 Saved embeddings to cache for topology {topology_hash[:8]}")
 
     def match_scenario(self, query):
         if not self.cluster_embeddings: return None, None
@@ -292,6 +344,7 @@ class PlannerAgent:
         
         ## Task
         Generate **{num_outputs}** DISTINCT and DIVERGENT extension plans from different function implementation paths to enhance this system. 
+        No matter what perspective you adopt, always keep *align with user requirements* as the primary goal. You can achieve this by using different functions or technologies.
         
         ## Reference Material (Knowledge Injection)
         We have retrieved knowledge from different domain clusters to inspire you.
@@ -304,13 +357,12 @@ class PlannerAgent:
         **Plan 1 (Deep Optimization)**:
         - Use **Source 1** (Near-Field) as your inspiration.
         - If Source 1 states "No papers highly relevant", explicitly mention "No papers highly relevant to this system were retrieved" in your rationale, and rely on general HCI knowledge to professionalize the system.
-        - Focus on discovering **innovative and feasible functional embeddings** and deep professional details missing from the Base Anchors. Focus on the most advanced or unique technical methods in the community summaries, rather than the most conventional ones.
+        - Focus on discovering **innovative and feasible functional embeddings** and deep professional details missing from the Base Anchors. Focus on the most advanced or unique technical methods in the community summaries, rather than conventional ones.
         
         **Plan 2 (Cross-Domain Inspiration)** (If requested):
-        - Use **Source 2** (Far-Field) as your inspiration.
-        - Focus on **innovative cross-domain transfer**: Instead of just introducing conventional ideas, extract typical processing patterns, novel technologies or main implementation methods from Source 2 that can significantly improve the User's domain.
+        - Use **Source 2** (Far-Field) as your inspiration. Try to answer: "How would an expert with new tech in Source 2 solve the problems in the User's query?"
+        - Focus on **innovative cross-domain transfer**: Instead of just introducing conventional ideas, extract typical processing patterns, novel technologies or main implementation methods from Source 2 that can significantly improve the performance of the system.
         - Perform **Concept Blending**: specific methods from Source 2 (e.g., "Medical Monitoring") should be metaphorically and innovatively transferred to the User's domain (e.g., "Education Monitoring").
-        - Ask yourself: "How would an expert with new tech in Source 2 solve the problems in the User's query?"
         
         **Plan 3+** (If requested):
         - Use **Source 3+** similarly to propose a DISTINCT innovative functional embedding, differing in implementation methods or referenced technologies from previous plans.
@@ -333,7 +385,7 @@ class PlannerAgent:
         {{
             "plans": [
                 {{
-                    "perspective": "use phrases or one short sentence to describe the perspective, highlighting the key functions or biggest advantages and innovations of this design (e.g., 'Immersive interactive feedback'). Do not just copy the perspective title or vague terms like 'cross-domain'",
+                    "perspective": "use one short phrase to describe the perspective, highlighting the key functions or biggest advantages and innovations of this design (e.g., 'Immersive interactive feedback'). Do not just copy the perspective title or vague terms like 'cross-domain'",
                     "rationale": "Explain explicitly: 'Inspired by [Source Name], we introduced [Feature] to achieve [Goal]...'",
                     "additional_anchors": [
                         {{
@@ -620,7 +672,7 @@ class IntegratorAgent:
             slim_retrieved_info[anchor] = slim_nodes
 
         prompt = f"""
-        You are a professional designer and architect in the field of HCI. Design a *complete and detailed* pipeline based on the user's requirements and the retrieved information.
+        You are a professional designer and architect in the field of HCI. Design a *complete and detailed* pipeline to meet the user's requirements.
         
         ## User Requirements
         User Query: ```{query}```
@@ -632,8 +684,8 @@ class IntegratorAgent:
         ## Retrieved Information
         You have the following sources of information. Use them according to the rules.
         1. **Retrieved Modules**: 
-            - These are modules extracted from the domain-specific literature that are similar to each conceptual step. Their descriptions include their functions, data processing methods and specific technical methods.
-            - Refer to them to fill in the technical implementation of these specific nodes.
+            - These are modules extracted from the domain-specific literature that are similar to each conceptual step. Their descriptions include their functions and specific technical methods.
+            - Refer to them to fill in the technical implementation of these specific nodes. But you SHOULD abstract away the original paper context (such as the nameing of the module in the article). Translate the core technical concepts into generic terms and tightly fuse them with the user's specific scenario. The generated explanations should feel like a native, tailored solution to the user's problem.
             - Each conceptual step may have retrieved multiple nodes with similar functions. You need to conduct appropriate screening or combination to be able to assemble a complete process.
         2. **Structural Paths**: 
             - These are retrieved data flow connections between conceptual steps derived from the user's requirements.
@@ -647,13 +699,13 @@ class IntegratorAgent:
         Structural Paths: ```{hints_text}```\n\n
         
         ## TASK
-        Conceive the complete data link and functional architecture, and ultimately synthesize a cohesive flowchart/architecture diagram. 
+        Conceive the complete data link and functional architecture, and ultimately synthesize a cohesive flowchart/architecture diagram.
         ### Steps and Rules 
         1. **Define Modules**: Sort out user requirements and retrieved information and define the necessary modules in the entire architecture.
             - **Naming Rule**: Use **Generic Functional Names** (e.g., "Gaze Tracker", "Dialogue Manager") for the modules. **DO NOT** use specific paper titles, citation indices, or long implementation names (e.g. NOT "Gaze360: Physically Unconstrained...").
             - Ensure the added nodes from the divergent plans are integrated meaningfully.
+            - **Provide highly detailed descriptions for both `function` and `technical_methods` from the retrieved information BUT DO NOT FABRICATE.** You must explicitly articulate the module's specific role, core responsibilities, and crucial importance within the overall system. Explain exactly HOW the technical methods work, process data, and why they were chosen, avoiding brief or vague summaries.
             - If there are subnodes within the modules (based on the retrieved information and relevant to the current context), they should also be defined. Explicitly map out the intermediate processes and data flow within the module using subnodes so its internal logic is transparent.
-            - **Detail Requirement**: Provide highly detailed descriptions for both `function` and `technical_methods` from the retrieved information BUT DO NOT FABRICATE. You must explicitly articulate the module's specific role, core responsibilities, and crucial importance within the overall system. Explain exactly HOW the technical methods work, process data, and why they were chosen, avoiding brief or vague summaries.
         2. **Connect the Flow**: Use the topology info to decide logical connections. 
             - Ensure new conceptual modules have comprehensive connections with the base logic to fully realize their functional value. DO NOT let them become dead ends unless explicitly defined as output endpoints.
             - All the connections should be implemented from the modules defined above. Do not include any other nodes, especially when defining the source_mod and the target_mod in ports.
@@ -667,11 +719,11 @@ class IntegratorAgent:
         {{
             "overall_description": "...",
             "module_details": [
-                "<module name>": {{
+                {{
                     "name": "the module name",
                     "brief_description": "A one-sentence concise explanation of the module's core functional role, meant directly for rendering on the visual node. Emphasize how it serves the current scenario without paper-specific jargon.",
                     "function": "Detailed explanation of the module's function, its core responsibilities, and its crucial role and importance within the overall system architecture.",
-                    "technical_methods": "Detailed description of the specific algorithms, models, or technical methods used, including HOW they process data and why they are selected. You MUST abstract away the original paper context. Translate the core technical concepts into generic terms and tightly fuse them with the user's specific scenario. The generated explanations should feel like a native, tailored solution to the user's problem.",
+                    "technical_methods": "Detailed description of the specific algorithms, models, or technical methods used, including HOW they process data and why they are selected. You MUST abstract away the original paper context. ",
                     "role": "choose from ["input", "output", "processing", "data"]",
                     "references": "Exact names of the sourced modules from Retrieved Information, comma-separated. Use 'None' if not available.",
                     "sub_nodes": [
@@ -748,7 +800,10 @@ class IntegratorAgent:
         Fix the errors listed in the report. 
         1. If a node is missing (dangling edge), define it.
         2. If a node is isolated, connect it or remove it if truly unnecessary.
-        3. Ensuring all 'source_mod' and 'target_mod' in ports refer to valid keys in 'module_details'.
+        3. Ensuring all 'source_mod' and 'target_mod' in ports refer to valid keys (or 'name' fields if using list) in 'module_details'.
+
+        **CRITICAL REQUIREMENT:** 
+        `module_details` MUST be a LIST containing the FULL, COMPLETE architecture with ALL nodes (both modified and unmodified) as objects. Do NOT only output the changed nodes. Failure to output unmodified nodes will break the system.
 
         Return the FULLY CORRECTED JSON object.
         """
@@ -845,131 +900,216 @@ class IntegratorAgent:
 class EditorAgent:
     def __init__(self, client):
         self.client = client
+        self.model = "gpt-4o-2024-11-20"
 
-    def analyze_instruction(self, user_instruction, current_plan_dict):
+    def edit_plan(self, current_plan, user_instruction, history_summary, retriever):
         """
-        Analyzes the user's instruction to determine if external knowledge retrieval is needed.
+        Analyzes the user's instruction, retrieves necessary information, and revises the architecture.
+        Maintains modification history for context.
         """
-        print(f"🧠 Editor: Analyzing if instruction needs external knowledge...")
-        prompt = f"""
-        Analyze the user's instruction to modify the following system architecture.
+        print(f"🧠 Editor: Processing modification request with lineage history...")
         
-        ## Current Plan
-        {json.dumps(current_plan_dict, indent=2)}
-        
-        ## User Instruction
-        {user_instruction}
-        
-        ## Task
-        Determine if the user's instruction requires external domain knowledge (e.g., adding new interactive features, clarifying complex processes, integrating new technologies).
-        If the instruction is just a simple renaming, deletion, or basic rewiring, retrieval is NOT needed.
-        If the instruction requires specific technical implementation details or structural inspiration, extract 1-3 highly descriptive keyword phrases to search for in a research database.
-        
-        ## Output Format (JSON only)
-        {{
-            "needs_retrieval": true/false,
-            "search_queries": ["query1", "query2"] // Empty if needs_retrieval is false
-        }}
-        """
-        try:
-            response = self.client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.1,
-                response_format={"type": "json_object"}
-            ).choices[0].message.content
-            return json.loads(response)
-        except Exception as e:
-            print(f"Error analyzing instruction: {e}")
-            return {"needs_retrieval": False, "search_queries": []}
+        # 1. Prepare Tools
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "retrieve_knowledge",
+                    "description": "Retrieve domain knowledge or technical details when the user's request involves specific concepts, technologies, or complex workflows that are not fully understood or need external validation.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {
+                                "type": "string",
+                                "description": "The search query to find relevant modules or patterns."
+                            }
+                        },
+                        "required": ["query"]
+                    }
+                }
+            }
+        ]
 
-    def revise_arch(self, current_plan, user_instruction, initial_query, additional_context=""):
-        """
-        Revises the current architecture based on user instructions.
-        
-        Args:
-            current_plan (str or dict): The current architecture plan (JSON).
-            user_instruction (str): User's modification or optimization instruction.
-            initial_query (str): The original user requirement.
-            
-        Returns:
-            dict: The revised architecture plan.
-        """
-        # Normalize current_plan to dict if it's a string
+        # 2. Prepare Context & History
+        history_text = "No previous modifications."
+        if history_summary:
+            history_text = "## Modification History (Chronological)\n"
+            for item in history_summary:
+                if item['type'] == 'Initial Plan':
+                     history_text += f"- Step {item['step']} [Initial]: {item['perspective']} - {item['result_description']}\n"
+                else:
+                     history_text += f"- Step {item['step']} [Mod]: User asked '{item['user_instruction']}' -> Result: {item['result_description']}\n"
+
+        # Ensure current plan is a dict
         if isinstance(current_plan, str):
             try:
-                current_plan_dict = json.loads(current_plan)
-            except json.JSONDecodeError:
-                print("Error: current_plan is not a valid JSON string.")
-                return current_plan
-        else:
-            current_plan_dict = current_plan
+                current_plan = json.loads(current_plan)
+            except:
+                pass
 
-        prompt = f"""
-        You are an expert system architect specializing in HCI systems. Your task is to modify the current system architecture based on the user's specific instruction. 
+        system_prompt = f"""
+        You are an expert System Architect. You are collaborating with a user to modify a system architecture design.
         
-        ## Context
-        - **Original User Query**: {initial_query}
-        - **Current Architecture**: 
-          {json.dumps(current_plan_dict, indent=2)}
-        - **User Instruction**: {user_instruction}
+        ## Your Capabilities
+        1. **Analyze**: Understand the user's intent and the current architecture.
+        2. **Retrieve**: If the user asks for something that need specific knowledge or technical details (e.g., "Add a Kafka stream", "Use a Transformer model"), use the `retrieve_knowledge` tool to get technical details.
+        3. **Modify**: Update the architecture JSON to reflect the changes.
         
-        ## Additional Domain Knowledge (If provided)
-        {additional_context}
+        ## Evolution Context
+        This is the current state of the plan. Here is the history of how it evolved:
+        {history_text}
+        
+        ## Current Architecture
+        {json.dumps(current_plan, indent=2)}
         
         ## Task
-        Apply the user's instruction to make profound and structurally sound changes to the architecture. 
-        If "Additional Domain Knowledge" is provided, you MUST use it to deeply restructure the system flow and provide specific technical details (HOW it works), rather than just attaching a superficial empty node.
+        The user has provided an instruction. You must:
+        1. Analyze the instruction in context of the history (avoid repeating undone changes, or building on top of recent changes).
+        2. If you need external knowledge (e.g., technical specs, similar modules), call `retrieve_knowledge`.
+        3. Propose a modification plan (in your thought process).
+        4. Output the FINAL JSON with the modifications.
         
-        ## Guidelines
-        1. **Locality**: Make only the changes that are directly related to the user's instruction. Do NOT alter parts of the architecture that are unrelated to the request.
-        2. **Preservation**: Maintain all existing modules and connections that are not specifically targeted by the user's instruction.
-        3. **Consistency**: Ensure the modified architecture remains consistent and coherent. Preserve the overall system flow and logic.
-        4. **Accuracy**: When adding or modifying modules, maintain correct naming, functionality, and interconnections.
-        5. **Integrity**: Ensure all 'source_mod' and 'target_mod' in ports refer to valid keys in 'module_details'.
+        ## Modification Rules
+        1. **Locality**: Only change what is requested.
+        2. **Preservation**: Keep existing modules unless asked to remove them.
+        3. **Consistency**: Ensure the graph remains connected and logical.
+        4. **Integrity**: Ensure all `source_mod` and `target_mod` in ports refer to valid keys in `module_details`.
         
-        ## Example Instructions
-        - "Add a database to store user profiles" → Add a new module named "Database" with appropriate function, and connect it where relevant (e.g., to a "User Manager").
-        - "Make the system more secure" → Add security-related modules like "Authentication Module" or enhance existing modules with security functions.
-        - "Remove the notification system" → Delete modules related to notifications and update connections accordingly.
-        
-        ## Output Format
-        Return the full updated architecture in the same JSON structure as the input, including all unchanged parts:
+        ## Final Output Format
+        You must output a JSON object with the following structure, with the format of revised_plan exactly same as the original plan structure:
         {{
-            "overall_description": "...",
-            "module_details": [
-                {{
-                    "name": "...",
-                    "brief_description": "A one-short-sentence concise explanation of the module's core functional role.",
-                    "function": "Detailed explanation of the module's function, its core responsibilities, and its crucial role and importance within the overall system architecture.",
-                    "technical_methods": "Detailed description of the specific algorithms, models, or technical methods used, including HOW they process data and why they are selected.",
-                    "role": "choose from [\"input\", \"output\", \"processing\", \"data\"]",
-                    "references": "...",
-                    "sub_nodes": [...],
-                    "ports": {{
-                        "incoming": [...],
-                        "outgoing": [...],
-                        "internal_flow": [...]
+            "modification_intent": "A concise summary of what you changed (e.g., 'Added Authentication Module and connected it to User Interface')",
+            "revised_plan": {{
+                "overall_description": "The overall description of the ENTIRE revised system architecture. Update the original description to reflect your changes, but DO NOT just write your modification intent here.",
+                "module_details": [
+                    {{
+                        "name": "ModuleNameA",
+                        "brief_description": "...",
+                        "function": "...",
+                        "technical_methods": "...",
+                        "role": "...",
+                        "sub_nodes": [],
+                        "ports": {{}}
+                    }},
+                    {{
+                        "name": "ModuleNameB",
+                        "brief_description": "...",
+                        "function": "...",
+                        "technical_methods": "...",
+                        "role": "...",
+                        "sub_nodes": [],
+                        "ports": {{}}
                     }}
-                }},
-                ...
-            ]
+                ]
+            }}
         }}
+        
+        **CRITICAL REQUIREMENT:** 
+        1. `overall_description` MUST describe the full, comprehensive system workflow after your changes.
+        2. `module_details` MUST be a LIST containing the FULL, COMPLETE architecture with ALL nodes (both modified and unmodified) as objects. Do NOT only output the changed nodes. Failure to output unmodified nodes will break the system.
         """
 
-        try:
-            response = self.client.chat.completions.create(
-                model="gpt-4o-2024-11-20",
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.1,
-                response_format={"type": "json_object"},
-            ).choices[0].message.content
+        messages = [{"role": "system", "content": system_prompt}]
+        messages.append({"role": "user", "content": user_instruction})
+
+        # 3. Execution Loop
+        max_steps = 5
+        current_step = 0
+        
+        while current_step < max_steps:
+            current_step += 1
             
-            # print(response)
-            return response
-        except Exception as e:
-            print(f"Error in revising architecture: {e}")
-            return current_plan
+            try:
+                response = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=messages,
+                    tools=tools,
+                    tool_choice="auto",
+                    response_format={"type": "json_object"}
+                )
+                
+                msg = response.choices[0].message
+                
+                # Check for tool calls
+                if msg.tool_calls:
+                    messages.append(msg) # Add assistant's message with tool calls
+                    
+                    for tool_call in msg.tool_calls:
+                        if tool_call.function.name == "retrieve_knowledge":
+                            args = json.loads(tool_call.function.arguments)
+                            query = args.get("query")
+                            print(f"🔍 Editor calling tool: retrieve_knowledge('{query}')")
+                            
+                            # Execute retrieval using the passed retriever instance
+                            # We'll use a simplified retrieval wrapper here
+                            # Create fake anchors for the retriever
+                            search_anchors = [{"user_term": query, "description": "User requested enhancement"}]
+                            retrieved_map = retriever.retrieve_for_module(search_anchors, top_k=3, include_topology=True)
+                            
+                            # Format results
+                            context_text = f"### Retrieval Results for '{query}':\n"
+                            found_any = False
+                            for term, nodes in retrieved_map.items():
+                                for n in nodes:
+                                    found_any = True
+                                    context_text += f"- Module: {n.node.metadata.get('name', 'Unknown')}\n"
+                                    context_text += f"  Info: {n.node.text[:500]}...\n"
+                            
+                            if not found_any:
+                                context_text += "No relevant modules found."
+                                
+                            messages.append({
+                                "tool_call_id": tool_call.id,
+                                "role": "tool",
+                                "name": "retrieve_knowledge",
+                                "content": context_text
+                            })
+                    
+                    # Continue loop to let model use the info
+                    continue
+                
+                # If no tool calls, this is the final response
+                content = msg.content
+                try:
+                    import re
+                    # Try direct JSON parsing
+                    try:
+                        result = json.loads(content)
+                        return result
+                    except json.JSONDecodeError:
+                        print(f"Failed to parse JSON directly. Attempting regex extraction...")
+                        # Fallback: extract JSON from markdown code blocks
+                        json_match = re.search(r'```(?:json)?\s*(.*?)\s*```', content, re.DOTALL)
+                        if json_match:
+                            try:
+                                return json.loads(json_match.group(1))
+                            except json.JSONDecodeError:
+                                pass
+                        
+                        # Fallback: extract outermost JSON object
+                        json_match = re.search(r'(\{.*\})', content, re.DOTALL)
+                        if json_match:
+                            try:
+                                return json.loads(json_match.group(1))
+                            except json.JSONDecodeError:
+                                pass
+                        
+                        print(f"Error parsing final JSON even after extraction. Retrying...")
+                        # Append a user message asking to fix the JSON format
+                        messages.append({"role": "assistant", "content": content})
+                        messages.append({"role": "user", "content": "The JSON you provided is invalid. Please ensure it is strictly valid JSON without any // comments, trailing commas, or markdown outside the valid JSON object format."})
+                        continue
+
+                except Exception as e:
+                    print(f"Unexpected error when parsing content: {e}")
+                    continue
+
+            except Exception as e:
+                print(f"Error in edit_plan loop: {e}")
+                break
+                
+        return None
+
 
 class ConflictSolver:
     def __init__(self):
@@ -1172,7 +1312,7 @@ class ConflictSolver:
                 print(f"  Start Refactoring: Isolated node '{m_id}' removed.")
                 cleaned_count += 1
                 
-        data["module_details"] = final_modules
+        data["module_details"] = list(final_modules.values())
         
         if cleaned_count > 0:
             print(f"✅ ConflictSolver: Removed {cleaned_count} isolated modules.")

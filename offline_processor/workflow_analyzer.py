@@ -241,8 +241,11 @@ class TopologyAnalyzer:
             
             {context_text}
             
-            Task: Summarize the common functionality and application domain of this group in 2-3 sentences. 
-            Focus on what kind of systems these are (e.g., "Healthcare management systems", "E-commerce platforms", etc.) and their key capabilities.
+            Task: Synthesize the core characteristics of this cluster in 3-4 sentences.
+            1. First, summarize the common functionality and main application domain of this group (e.g., "Healthcare management systems", "Immersive VR Education", etc.).
+            2. Second, explicitly highlight the **Innovative Features & Technical Focus** of this cluster. What specific advanced use-cases, unconventional goals, or cutting-edge problem domains distinguish this group of applications from standard systems?
+            
+            Keep the output strictly to a structured summary paragraph.
             """
             
             try:

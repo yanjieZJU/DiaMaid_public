@@ -93,8 +93,21 @@ def execute_read_with_session(driver, func, *args, **kwargs):
 def custom_retrieve(query_text, vector_store, graph_store, top_k, node_type=None, role_filter=None, community_id=None):
     print(f"\n🔍 Executing Custom Retrieval for: '{query_text}'")
     embed_model = get_embed_model()
-    query_embedding = embed_model.get_query_embedding(query_text)
     
+    query_embedding = None
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            query_embedding = embed_model.get_query_embedding(query_text)
+            break
+        except Exception as e:
+            print(f"⚠️ OpenAI Embedding API Connection Error (Attempt {attempt+1}/{max_retries}): {e}")
+            if attempt < max_retries - 1:
+                time.sleep(1.0 * (2 ** attempt)) # backoff
+            else:
+                print("❌ Failed to get embedding due to repeated connection errors.")
+                return []
+                
     found_ids = []
     found_scores = []
     
