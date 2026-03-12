@@ -35,3 +35,4 @@ server/diamaid.db
 # Data directories
 data/
 server/data/
+server/graph_storage/
