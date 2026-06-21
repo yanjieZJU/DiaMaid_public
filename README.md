@@ -39,7 +39,7 @@
 
 1. **获取代码**
    ```bash
-   git clone https://github.com/mistymoonight/DiaMaid.git
+   git clone https://github.com/yanjieZJU/DiaMaid_public.git
    cd DiaMaid
    ```
 
