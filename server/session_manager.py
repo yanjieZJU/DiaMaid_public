@@ -66,21 +66,24 @@ def create_initial_plan(session_id: str, original_query: str, perspective: str, 
     
     return node_id
 
-def create_modified_plan(session_id: str, parent_node_id: str, user_instruction: str, original_query: str, modified_description: str, modified_arch_json: dict, perspective_prefix: str = "(已修改)") -> str:
+def create_modified_plan(session_id: str, parent_node_id: str, user_instruction: str, original_query: str, modified_description: str, modified_arch_json: dict, perspective_prefix: str = "(已修改)", editor_memory: dict = None) -> str:
     """
     Creates a new plan node derived from a parent node.
+
+    `editor_memory`: optional snapshot from the EditorAgent's memory subsystem,
+    persisted on the new node so the next edit on this branch can rehydrate it.
     """
     if not session_id:
         session_id = "anonymous_session"
-        
+
     session_data = _load_session(session_id)
-    
+
     # Retrieve parent perspective to inherit/modify
     parent_perspective = "Standard"
     if parent_node_id and parent_node_id in session_data["nodes"]:
         parent_node = session_data["nodes"][parent_node_id]
         parent_perspective = parent_node.get("perspective", "Standard")
-        
+
         # If it's already marked as modified, don't prefix again
         if perspective_prefix in parent_perspective:
             new_perspective = parent_perspective
@@ -88,9 +91,9 @@ def create_modified_plan(session_id: str, parent_node_id: str, user_instruction:
             new_perspective = f"{perspective_prefix} {parent_perspective}"
     else:
         new_perspective = f"{perspective_prefix} 方案"
-    
+
     new_node_id = str(uuid.uuid4())
-    
+
     node_data = {
         "id": new_node_id,
         "parent_id": parent_node_id,
@@ -105,10 +108,12 @@ def create_modified_plan(session_id: str, parent_node_id: str, user_instruction:
             {"role": "system", "content": f"修改完成: {modified_description[:50]}...", "timestamp": datetime.now().timestamp() * 1000}
         ]
     }
-    
+    if isinstance(editor_memory, dict) and editor_memory:
+        node_data["editor_memory"] = editor_memory
+
     session_data["nodes"][new_node_id] = node_data
     _save_session(session_data)
-    
+
     return new_node_id
 
 def get_session_tree(session_id: str) -> dict:

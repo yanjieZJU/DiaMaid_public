@@ -14,6 +14,7 @@ __pycache__/
 kgenv/
 venv/
 env/
+.env
 
 # Node
 node_modules/
@@ -23,16 +24,36 @@ node_modules/
 case_*/
 clustering_verification_results.json
 show_clustering_results.py
+server/reembed_graph_store.py
+server/test_merge_plan_edits.py
 
 evaluation/
 
+server/editor_agent_langgraph.py
+
 # Database
 server/diamaid.db
+server/kg_cluster/*.bak
+server/kg_cluster/community_mapping.json
 
 # Other untracked local logs
 *.log
+*.tmp
+*.pdf
 
 # Data directories
 data/
 server/data/
 server/graph_storage/
+server/rag_storage/
+
+eval_models.py
+*.html
+
+.github/
+
+check_missing_fields.py
+
+# config
+config.py
+

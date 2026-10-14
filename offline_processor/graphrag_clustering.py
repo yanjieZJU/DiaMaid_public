@@ -2,14 +2,16 @@
 GraphRAG Clustering Pipeline for Neo4j Module Nodes
 
 This script implements:
-1. KNN-based similarity edge creation with weights
-2. Leiden algorithm for hierarchical clustering (with smart stopping)
+1. KNN-based similarity edge creation with weights (within same role)
+2. Per-role Louvain clustering with resolution scaled by role size
 3. LLM-based community summarization (with caching and few-shot prompting)
 4. Writing community_id back to the database (with cleanup)
 
-Adjusting Cluster granularity:
-    - increase the resolution, e.g. res=1.5
-    - increase the MIN_SIMILARITY, e.g. MIN_SIMILARITY = 0.6
+Clustering strategy:
+    - Nodes are grouped by canonical role before clustering
+    - Resolution scales with role size so all roles produce similarly-sized communities
+    - Target: ~15 nodes per community
+    - Roles with only 1 node become forced singletons
 """
 
 import os
@@ -29,7 +31,7 @@ from collections import defaultdict
 # Add parent directory to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import *
-from server.retriever_neo4j import load_stores
+from server.retriever_neo4j import get_vector_store, get_graph_store
 
 
 # configuration
@@ -38,9 +40,25 @@ client = OpenAI(http_client=http_client)
 
 # Clustering Parameters
 KNN_K = 10
-MIN_SIMILARITY = 0.5  
+MIN_SIMILARITY = 0.5
 MAX_HIERARCHY_LEVELS = 3
 MIN_REDUCTION_RATIO = 0.10  # If communities reduce by less than 10%, stop.
+
+TARGET_COMMUNITY_SIZE = 20   # Desired average nodes per community
+
+def resolution_for_role(n_nodes: int) -> float:
+    """
+    Return a Louvain resolution scaled so the expected community size
+    is ~TARGET_COMMUNITY_SIZE regardless of how many nodes a role has.
+
+    Empirically, resolution ≈ n_nodes / (TARGET * baseline_factor).
+    We use baseline_factor=10 (calibrated so that a 150-node role at
+    resolution=1.0 yields ~15 communities of ~10 nodes each).
+
+    Clamped to [0.5, 8.0] to avoid degenerate extremes.
+    """
+    raw = n_nodes / (TARGET_COMMUNITY_SIZE * 10.0)
+    return round(max(0.5, min(8.0, raw)), 2)
 
 # Path relative to project root
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -49,8 +67,9 @@ os.makedirs(CACHE_DIR, exist_ok=True)
 CACHE_FILE = os.path.join(CACHE_DIR, "community_summary_cache.json")
 
 class GraphClustering:
-    def __init__(self, vector_store, graph_store):
-        self.vector_store = vector_store
+    def __init__(self, emb_matrix, emb_ids, graph_store):
+        # emb_matrix: np.ndarray (N, D); emb_ids: list[str]
+        self._embedding_dict = {nid: emb_matrix[i] for i, nid in enumerate(emb_ids)}
         self.graph_store = graph_store
         self.module_nodes = []
         self.embeddings = []
@@ -89,12 +108,14 @@ class GraphClustering:
         r2 = extract_role(role_b)
         return r1 == r2
         
-    def create_constrained_edges(self):
+    def create_constrained_edges(self, write_edges_to_neo4j=True):
         """
-        Step 1: Create KNN-based similarity edges with weights
+        Step 1: Load module nodes/embeddings, optionally write KNN edges to Neo4j.
+        Pass write_edges_to_neo4j=False to skip the slow Neo4j write (e.g. on re-runs).
         """
         print("\n" + "="*60)
         print("STEP 1: Creating KNN Similarity Edges")
+        print(write_edges_to_neo4j)
         
         # 1.1 Fetch all MODULE nodes from Neo4j
         cypher = """
@@ -109,7 +130,7 @@ class GraphClustering:
             self.module_nodes = session.execute_read(fetch_modules)
         
         # 1.2 Get embeddings from vector store
-        embedding_dict = self.vector_store._data.embedding_dict
+        embedding_dict = self._embedding_dict
         valid_nodes = []
         for node in self.module_nodes:
             if node['id'] in embedding_dict:
@@ -120,9 +141,13 @@ class GraphClustering:
         self.module_nodes = valid_nodes
         self.embeddings = np.array(self.embeddings)
         print(f"Processing {len(self.module_nodes)} nodes with embeddings")
-        
+
         if len(self.module_nodes) == 0:
             print("No nodes found. Exiting.")
+            return 0
+
+        if not write_edges_to_neo4j:
+            print("⏭️  Skipping KNN computation and Neo4j edge write.")
             return 0
 
         # 1.3 Compute KNN
@@ -169,7 +194,7 @@ class GraphClustering:
             print("   Cleared existing SIMILAR_TO edges")
             
             # Batch create edges using UNWIND
-            batch_size = 500
+            batch_size = 2000
             for i in range(0, len(edges_to_create), batch_size):
                 batch = edges_to_create[i:i+batch_size]
                 session.execute_write(build_edges_batch, batch)
@@ -177,93 +202,98 @@ class GraphClustering:
     
     def leiden_clustering(self):
         """
-        Step 2: Perform Recursive Leiden clustering with Info Gain Check
+        Step 2: Per-role Louvain clustering.
+
+        Each canonical role is clustered independently with a resolution
+        proportional to its size (resolution_for_role).  This avoids the
+        problem where a giant role (e.g. decision_logic with 1000+ nodes)
+        dominates and produces a single massive community.
+
+        Community IDs are global and unique: L0_{role_slug}_{local_id}.
+        Only L0 is produced (single-level); hierarchy is not needed because
+        the role grouping already provides the semantic hierarchy.
         """
         print("\n" + "="*60)
-        print("STEP 2: Recursive Leiden Clustering")
+        print("STEP 2: Per-Role Louvain Clustering")
         print("="*60)
-        
-        # 2.1 Build NetworkX graph from Neo4j
-        G = nx.Graph()        
-        # Add nodes
-        for node in self.module_nodes:
-            G.add_node(node['id'])
-        
-        # Add edges with weights
-        cypher = """
-        MATCH (a:LlamaNode)-[r:SIMILAR_TO]-(b:LlamaNode)
-        WHERE a.type = 'MODULE' AND b.type = 'MODULE'
-        RETURN a.id as source, b.id as target, r.weight as weight
-        """
-        
-        def fetch_edges(tx):
-            return [dict(record) for record in tx.run(cypher)]
 
-        with self.graph_store._driver.session() as session:
-            edges = session.execute_read(fetch_edges)
-            for record in edges:
-                G.add_edge(record['source'], record['target'], 
-                          weight=record['weight'])
-        
-        current_graph = G
         import community as community_louvain
-        
-        prev_community_count = current_graph.number_of_nodes() # Start with N communities
-        
-        for level in range(MAX_HIERARCHY_LEVELS):
-            print(f"Processing Level {level}")
-            if current_graph.number_of_nodes() < 2:
-                break
-                
-            res = 1.5 if level == 0 else 0.8 # Slightly looser for higher levels
-            partition = community_louvain.best_partition(current_graph, weight='weight', resolution=res)
-            unique_comms = set(partition.values())
-            curr_community_count = len(unique_comms)
-            
-            print(f"   Nodes: {current_graph.number_of_nodes()} -> Communities: {curr_community_count}")
 
-            # Check Information Gain / Reduction Ratio
-            reduction = (prev_community_count - curr_community_count) / prev_community_count
-            print(f"   Reduction Ratio: {reduction:.2%}")
-            
-            if level > 0 and reduction < MIN_REDUCTION_RATIO:
-                 print(f"🛑 Stopping: Reduction {reduction:.2%} < Threshold {MIN_REDUCTION_RATIO:.2%}. Info gain too low.")
-                 break
+        # Build embedding dict for fast lookup
+        emb_dict = {node['id']: self.embeddings[i]
+                    for i, node in enumerate(self.module_nodes)}
 
-            prev_community_count = curr_community_count
+        # Group nodes by canonical role
+        role_groups: dict[str, list[dict]] = defaultdict(list)
+        for node in self.module_nodes:
+            role = node.get('role') or 'unknown'
+            if ':' in role:
+                parts = role.split(':', 1)
+                role = f"{parts[0].strip()}:{parts[1].strip()}"
+            role_groups[role].append(node)
 
-            formatted_partition = {}
-            for child_id, raw_comm_id in partition.items():
-                new_comm_id = f"L{level}_{raw_comm_id}"
-                formatted_partition[child_id] = new_comm_id
-                self.level_communities[level].add(new_comm_id)
-        
-            self.hierarchy_map[level] = formatted_partition
-            
-            # --- Prepare Next Level ---
-            # Check absolute convergence (single root or no change)
-            if curr_community_count == 1:
-                print("   Stopped: Converged to single root.")
-                break
-            
-            print("   Building SuperGraph for next level ...")
-            next_graph = nx.Graph()
+        print(f"  Roles to cluster: {len(role_groups)}")
 
-            for comm_id in self.level_communities[level]:
-                next_graph.add_node(comm_id)
+        global_partition: dict[str, str] = {}   # node_id -> community_id
+        community_counter = 0
 
-            # Aggregate Edges
-            for u, v, data in current_graph.edges(data=True):
-                comm_u = formatted_partition[u]
-                comm_v = formatted_partition[v]
-                if comm_u != comm_v:
-                    w = data.get('weight', 1.0)
-                    if next_graph.has_edge(comm_u, comm_v):
-                        next_graph[comm_u][comm_v]['weight'] += w
-                    else:
-                        next_graph.add_edge(comm_u, comm_v, weight=w)
-            
-            current_graph = next_graph
+        for role, nodes in sorted(role_groups.items()):
+            n = len(nodes)
+            role_slug = role.replace(':', '_').replace(' ', '_').replace('/', '_')
+
+            if n == 1:
+                # Forced singleton
+                comm_id = f"L0_{community_counter}"
+                global_partition[nodes[0]['id']] = comm_id
+                self.level_communities[0].add(comm_id)
+                community_counter += 1
+                continue
+
+            # Build embeddings array for this role
+            role_embs = np.array([emb_dict[node['id']] for node in nodes
+                                   if node['id'] in emb_dict])
+            role_ids  = [node['id'] for node in nodes if node['id'] in emb_dict]
+
+            if len(role_ids) < 2:
+                comm_id = f"L0_{community_counter}"
+                global_partition[role_ids[0]] = comm_id
+                self.level_communities[0].add(comm_id)
+                community_counter += 1
+                continue
+
+            # KNN within role
+            real_k = min(KNN_K + 1, len(role_ids))
+            nbrs = NearestNeighbors(n_neighbors=real_k, metric='cosine').fit(role_embs)
+            distances, indices = nbrs.kneighbors(role_embs)
+
+            G = nx.Graph()
+            for nid in role_ids:
+                G.add_node(nid)
+            for i, nid in enumerate(role_ids):
+                for j in range(1, indices.shape[1]):
+                    nb_idx = indices[i][j]
+                    nb_id  = role_ids[nb_idx]
+                    sim = 1.0 - distances[i][j]
+                    if sim >= MIN_SIMILARITY:
+                        G.add_edge(nid, nb_id, weight=float(sim))
+
+            # Scale resolution by role size
+            res = resolution_for_role(n)
+            print(f"  {role:50s}  n={n:5d}  res={res}")
+
+            partition = community_louvain.best_partition(G, weight='weight', resolution=res)
+
+            # Map local partition IDs to global IDs
+            local_to_global: dict[int, str] = {}
+            for node_id, local_id in partition.items():
+                if local_id not in local_to_global:
+                    local_to_global[local_id] = f"L0_{community_counter}"
+                    self.level_communities[0].add(f"L0_{community_counter}")
+                    community_counter += 1
+                global_partition[node_id] = local_to_global[local_id]
+
+        print(f"\n  Total L0 communities: {len(self.level_communities[0])}")
+        self.hierarchy_map[0] = global_partition
             
     def generate_summaries(self):
         """
@@ -401,7 +431,7 @@ class GraphClustering:
                     response = client.chat.completions.create(
                         model = "gpt-4o-mini",
                         messages=[{"role":"user", "content":prompt}],
-                        temperature=0.3
+                        temperature=0
                     )
                     summary = response.choices[0].message.content
                     self.hierarchy_summaries[level][comm_id] = summary
@@ -420,133 +450,112 @@ class GraphClustering:
     
     def write_hierarchy_to_db(self):
         """
-        Step 4: Write hierarchical data and CLEANUP old levels
+        Step 4: Write L0 community data to Neo4j and clean up stale L1-L5 attributes.
         """
         print("\n" + "="*60)
-        print("STEP 4: Writing Hierarchy to Neo4j")
+        print("STEP 4: Writing Community Data to Neo4j")
         print("="*60)
-        
-        # Prepare a map: NodeID -> {L0_ID, L0_Sum, L1_ID, L1_Sum...}
-        node_updates = defaultdict(dict)
-        
-        # Helper to trace a node up the tree
-        def trace_node(node_id):
-            # Get L0
-            l0_comm = self.hierarchy_map[0].get(node_id)
-            if not l0_comm: return
-            
-            node_updates[node_id]['community_L0'] = l0_comm
-            node_updates[node_id]['summary_L0'] = self.hierarchy_summaries[0].get(l0_comm, "")
-            
-            # Trace up
-            curr_comm = l0_comm
-            for level in range(1, len(self.hierarchy_map)):
-                if curr_comm in self.hierarchy_map[level]:
-                    parent = self.hierarchy_map[level][curr_comm]
-                    node_updates[node_id][f'community_L{level}'] = parent
-                    node_updates[node_id][f'summary_L{level}'] = self.hierarchy_summaries[level].get(parent, "")
-                    curr_comm = parent
-                else:
-                    break
-        
-        for node in self.module_nodes:
-            trace_node(node['id'])
-            
-        print(f"Preparing to update {len(node_updates)} nodes...")
-        
-        # Batch Update
+
+        partition = self.hierarchy_map[0]
+        summaries = self.hierarchy_summaries[0]
+
         update_data = []
-        for nid, props in node_updates.items():
-            props['id'] = nid
-            update_data.append(props)
-            
+        for node in self.module_nodes:
+            nid = node['id']
+            comm = partition.get(nid)
+            if not comm:
+                continue
+            update_data.append({
+                'id':          nid,
+                'community_L0': comm,
+                'summary_L0':   summaries.get(comm, ""),
+            })
+
+        print(f"Preparing to update {len(update_data)} nodes...")
+
+        def set_batch(tx, cypher_query, batch_data):
+            tx.run(cypher_query, batch=batch_data)
+
         with self.graph_store._driver.session() as session:
-            def remove_old(tx):
-                if remove_clauses:
-                    remove_str = ", ".join(remove_clauses)
-                    tx.run(f"MATCH (n:LlamaNode) REMOVE {remove_str}")
-                    
-            def set_batch(tx, cypher_query, batch_data):
-                tx.run(cypher_query, batch=batch_data)
+            # 1. Remove stale L1-L5 attributes from previous multi-level runs
+            print("   Cleaning up stale L1-L5 attributes...")
+            session.run(
+                "MATCH (n:LlamaNode) "
+                "REMOVE n.community_L1, n.summary_L1, "
+                "n.community_L2, n.summary_L2, "
+                "n.community_L3, n.summary_L3, "
+                "n.community_L4, n.summary_L4, "
+                "n.community_L5, n.summary_L5"
+            )
 
-            # 1. CLEANUP OLD ATTRIBUTES
-            print("   🧹 Cleaning up old/stale hierarchy attributes...")
-            max_level = len(self.hierarchy_map) - 1
-            
-            # Remove any L{X} where X > max_level (in case previous runs went deeper)
-            # We arbitrarily clean up to Level 5 to be safe
-            remove_clauses = []
-            for l in range(max_level + 1, 6): 
-                remove_clauses.append(f"n.community_L{l}")
-                remove_clauses.append(f"n.summary_L{l}")
-            
-            session.execute_write(remove_old)
-
-            # 2. WRITE NEW ATTRIBUTES
-            set_clauses = []
-            for l in range(max_level + 1):
-                set_clauses.append(f"n.community_L{l} = node.community_L{l}")
-                set_clauses.append(f"n.summary_L{l} = node.summary_L{l}")
-            
-            set_clause_str = ",\n".join(set_clauses)
-            
+            # 2. Write L0
             batch_size = 500
             for i in range(0, len(update_data), batch_size):
-                batch = update_data[i:i+batch_size]
-                cypher = f"""
-                UNWIND $batch as node
-                MATCH (n:LlamaNode {{id: node.id}})
-                SET {set_clause_str}
-                """
-                session.execute_write(set_batch, cypher, batch)
+                batch = update_data[i:i + batch_size]
+                session.execute_write(
+                    set_batch,
+                    "UNWIND $batch as node "
+                    "MATCH (n:LlamaNode {id: node.id}) "
+                    "SET n.community_L0 = node.community_L0, "
+                    "    n.summary_L0   = node.summary_L0",
+                    batch
+                )
                 print(f"   Batch {i//batch_size + 1} written.")
 
-        # 3. INDEX SUMMARIES INTO VECTOR STORE
+        # 3. INDEX SUMMARIES INTO VECTOR STORE (numpy store)
         print("\n" + "="*60)
         print("STEP 5: Indexing Summaries to Vector Store")
         print("="*60)
-        
-        from llama_index.core.schema import TextNode
+
         from llama_index.embeddings.openai import OpenAIEmbedding
-        
-        # Initialize Embedding Model
+        import json as _json
+
+        STORAGE_DIR = os.path.join(BASE_DIR, "server", "graph_storage")
+        npy_path = os.path.join(STORAGE_DIR, "embeddings.npy")
+        ids_path = os.path.join(STORAGE_DIR, "embedding_ids.json")
+
+        # Load existing store
+        existing_matrix = np.load(npy_path)
+        with open(ids_path) as f:
+            existing_ids: list = _json.load(f)
+
+        # Remove old COMM_ entries
+        keep_mask = [not nid.startswith("COMM_") for nid in existing_ids]
+        kept_ids    = [nid for nid, k in zip(existing_ids, keep_mask) if k]
+        kept_matrix = existing_matrix[keep_mask]
+        print(f"   Removed {len(existing_ids) - len(kept_ids)} old COMM_ entries from vector store.")
+
+        # Embed new summaries
         embed_model = OpenAIEmbedding(
             model_name="text-embedding-3-small",
             api_key=os.environ.get("OPENAI_API_KEY"),
             api_base=os.environ.get("OPENAI_BASE_URL")
         )
-        
-        nodes_to_index = []
-        for level, summaries in self.hierarchy_summaries.items():
-            for comm_id, summary_text in summaries.items():
-                if not summary_text: continue
-                
-                # Create a persistent Node for the community
-                # ID format: COMM_L{level}_{id}
-                # e.g. COMM_L0_12
-                node_id = f"COMM_{comm_id}"
-                
-                node = TextNode(
-                    id_=node_id,
-                    text=summary_text,
-                    metadata={
-                        "type": "COMMUNITY_SUMMARY",
-                        "level": level,
-                        "community_id": comm_id,
-                        "name": f"Community {comm_id}"
-                    }
-                )
-                # Compute Embedding
-                node.embedding = embed_model.get_text_embedding(summary_text)
-                nodes_to_index.append(node)
-        
-        if nodes_to_index:
-            print(f"Adding {len(nodes_to_index)} community summaries to vector store...")
-            self.vector_store.add(nodes_to_index)
-            self.vector_store.persist(persist_path="./server/graph_storage/default__vector_store.json")
-            print("✅ Vector Store Updated and Persisted.")
+
+        new_ids: list[str] = []
+        new_vecs: list = []
+        for comm_id, summary_text in self.hierarchy_summaries[0].items():
+            if not summary_text:
+                continue
+            node_id = f"COMM_{comm_id}"
+            vec = embed_model.get_text_embedding(summary_text)
+            new_ids.append(node_id)
+            new_vecs.append(vec)
+
+        if new_vecs:
+            new_matrix = np.array(new_vecs, dtype=np.float32)
+            final_matrix = np.vstack([kept_matrix, new_matrix])
+            final_ids    = kept_ids + new_ids
         else:
-            print("No summaries to index.")
+            final_matrix = kept_matrix
+            final_ids    = kept_ids
+
+        np.save(npy_path, final_matrix)
+        with open(ids_path, 'w') as f:
+            _json.dump(final_ids, f)
+
+        print(f"   Added {len(new_ids)} new COMM_ entries. Vector store saved.")
+        print(f"   Total vector store size: {len(final_ids)}")
     
     @staticmethod
     def perform_clustering_in_memory(embeddings, ids, k=10, resolution=1.0):
@@ -595,22 +604,19 @@ class GraphClustering:
         """
         print("\n🚀 Starting GraphRAG Clustering Pipeline")
         print("="*60)
-        
-        self.create_constrained_edges()
+
+        self.create_constrained_edges(write_edges_to_neo4j=False)
         self.leiden_clustering()
         self.generate_summaries()
         self.write_hierarchy_to_db()
 
 
 def main():
-    # Load stores
     print("🔗 Connecting to Neo4j and Vector Store...")
-    vector_store, graph_store = load_stores()
-    
-    # Initialize clustering
-    clustering = GraphClustering(vector_store, graph_store)
-    
-    # Run full pipeline
+    matrix, ids = get_vector_store()
+    graph_store  = get_graph_store()
+
+    clustering = GraphClustering(matrix, ids, graph_store)
     clustering.run_full_pipeline()
 
 

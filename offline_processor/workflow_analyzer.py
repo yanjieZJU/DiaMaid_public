@@ -252,7 +252,7 @@ class TopologyAnalyzer:
                 response = client.chat.completions.create(
                     model="gpt-4o-mini",
                     messages=[{"role": "user", "content": prompt}],
-                    temperature=0.3
+                    temperature=0
                 )
                 summary = response.choices[0].message.content.strip()
             except Exception as e:
@@ -296,7 +296,7 @@ class TopologyAnalyzer:
             response = self.client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[{"role": "user", "content": prompt}],
-                temperature=0.3,
+                temperature=0,
                 max_tokens=80
             )
             return response.choices[0].message.content.strip()
@@ -404,7 +404,7 @@ class TopologyAnalyzer:
             response = self.client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[{"role": "user", "content": prompt}],
-                temperature=0.3,
+                temperature=0,
                 max_tokens=100
             )
             return response.choices[0].message.content.strip()
@@ -479,60 +479,43 @@ class TopologyAnalyzer:
     def run(self):
         sequences_map, wf_metadata_map, wf_community_map = self.fetch_workflow_role_sequences()
         all_sequences = list(sequences_map.values())
-        
-        # 1. Global Analysis
-        print("Running Global Analysis...")
-        # Enable LLM enrichment for global stats
-        global_transitions = self.analyze_transitions(all_sequences, enrich_with_llm=False)
-        global_patterns_3 = self.analyze_subsequences(all_sequences, 3)
-        global_patterns_4 = self.analyze_subsequences(all_sequences, 4)
-        
-        # 2. Cluster Analysis
-        # Graph clustering determines clusters automatically
+
+        # Cluster workflows by application scenario
         wf_clusters, cluster_descs = self.cluster_scenarios(wf_metadata_map)
-        
+
         cluster_insights = {}
         for label, wf_ids in wf_clusters.items():
-            # Get valid sequences for this cluster
-            # Get valid sequences for this cluster
             cluster_seqs = [sequences_map[wid] for wid in wf_ids if wid in sequences_map]
-            
+
             if not cluster_seqs: continue
-            
-            c_trans = self.analyze_transitions(cluster_seqs, enrich_with_llm=True)
+
             c_patt3 = self.analyze_subsequences(cluster_seqs, 3, enrich_with_llm=True)
             c_patt4 = self.analyze_subsequences(cluster_seqs, 4, enrich_with_llm=True)
             c_comm_dist = self.calculate_community_distribution(wf_ids, wf_community_map)
-            
+
             cluster_insights[str(label)] = {
                 "name": cluster_descs[label],
                 "workflow_count": len(cluster_seqs),
-                "transitions": c_trans,
                 "common_patterns_3": c_patt3,
                 "common_patterns_4": c_patt4,
                 "community_distribution": c_comm_dist
             }
 
-        # 3. Construct Final Object
+        # Construct Final Object (no global_stats / transitions)
         knowledge_base = {
             "metadata": {
                 "total_workflows_analyzed": len(all_sequences),
                 "generated_at": "offline (with clustering)",
-                "version": "1.1"
-            },
-            "global_stats": {
-                "transitions": global_transitions,
-                "common_patterns_3": global_patterns_3,
-                "common_patterns_4": global_patterns_4
+                "version": "1.2"
             },
             "scene_clusters": cluster_insights
         }
-        
-        # 4. Save
+
+        # Save
         with open(OUTPUT_FILE, 'w', encoding='utf-8') as f:
             json.dump(knowledge_base, f, indent=2, ensure_ascii=False)
-            
-        print(f"✅ System Topology Knowledge (Clustered) saved to {OUTPUT_FILE}")
+
+        print(f"✅ System Topology Knowledge saved to {OUTPUT_FILE}")
 
         self.driver.close()
 

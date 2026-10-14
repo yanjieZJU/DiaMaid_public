@@ -1,84 +1,44 @@
-# DiaMaid (Diagram Maid)
+# DiaMaid
 
-**DiaMaid** 是一款智能驱动的系统设计与架构图助手。它能够将自然语言的系统描述和简单的节点约束，转化为专业、详尽的系统架构方案和架构图。通过结合大语言模型 (LLMs) 多智能体协同，DiaMaid 致力于帮助研究人员、开发者和架构师轻松推演复杂系统的可视化与方案设计。
+面向交互系统概念设计的 AI 协作工具。DiaMaid 将自然语言需求转化为可查看、可编辑的系统架构方案，支持围绕同一份结构化表示持续探索和修改设计。
 
-## 🌟 核心特性 (Key Features)
+项目简介
 
-### 1. 智能生成多视角方案 
-- **发散性规划 (Divergent Planning)**：只要输入一段大体的需求描述，后台多智能体会自动发散，提供多个不同技术侧重点的系统架构方案（以 Excel 工作表 Tab 形式呈现），全方位启发您的设计灵感。
-- **丰富的节点详情**：您设计的不仅仅是连线的图表。每个模块节点内都包含了：
-  - **核心功能 (Function)**
-  - **技术手段与实现细节 (Technical Methods)**
-  - **模块说明 (Brief Description)** 等重要结构化设计参考。
-  
-### 2. 交互式对话编辑与演进 (Agentic Editing)
-- **对话修改架构**：对当前生成的方案细节不满意？在左侧聊天栏直接输入修改指令（如“添加一个 Redis 缓存中心”或“将数据存储改为 MySQL”），AI 会基于当前所选方案进行局部逻辑更新，并生成一条新的方案分支。
-- **无缝回溯**：所有用户的修改指令和系统的更新结果均会产生完整的对话历史演进记录，方便您回顾过程和版本对比。
+系统概念设计需要确定模块、模块关系和数据流。DiaMaid 将这些内容组织为架构图和模块详情，并提供对话式方案生成与编辑流程。它是一个研究原型，用于探索 AI 如何参与架构构思与迭代。
 
-### 3. 直观的可视化工作区
-- **React Flow & Mermaid.js**：提供了直观的白板结构和详尽的自动排版流程图。右侧面板分为渲染图区和信息详情区。单击流程图内的任何节点即可在右下角查看该模块的详细参数。
-- **手动节点辅助**：支持在生成前，在左侧向画布中预置强行要求的核心基础节点，AI将确保将这些预设元素融合到最终生成的架构中。
-- **快速渲染测试**：提供独立的 JSON 免后端测试通道，粘贴合法的架构方案 JSON 即可直接渲染图表，方便研发调试。
+主要功能
 
-### 4. 专业报告导出 (Export)
-- **一键导出 Word 文档**：在完成架构推演设计后，点击方案选项卡右上方的 **“导出为 Word”** 按钮。后台将自动为您排版生成一份专业`.docx`设计报告（内含当前的高清架构图图片、总体介绍以及各个模块属性细节表）。
+- 多视角架构生成：结合需求、基础模块、关系约束和检索结果，生成多种设计方案。
+- 知识图谱检索：从 Neo4j 和本地向量索引中检索模块信息与结构路径。
+- 架构图编辑：查看模块、端口和连接；通过自然语言修改方案，并保存为新的版本。
+- 方案历史与编辑记忆：按父子关系记录方案迭代，支持查看分支历史和恢复上一个版本。
+- 文献问答：独立聊天页面可结合关键词和向量检索查询论文内容。
+- Word 导出：导出方案信息与架构图。
 
-## 🛠️ 技术栈 (Tech Stack)
+系统结构
 
-- **前端 (Client)**：React, Vite, React Flow, Mermaid.js
-- **后端 (Server)**：Python, FastAPI, Pydantic, python-docx
-- **AI 与核心引擎**: 基于 OpenAI API 的底层多智能体协同管线 (Planner, Integrator, Editor, Reviewer 等)。
+- `client/`：React、Vite 前端；主设计界面使用 AntV X6，另有 React Flow 和 Mermaid 视图组件及聊天页面。
+- `server/`：FastAPI 服务，提供生成、编辑、会话、问答和文档导出接口。
+- `offline_processor/`：论文解析、知识图谱构建及离线处理脚本。
+- `server/agents.py`、`server/editor_memory.py`：Agent 工作流与分支编辑记忆。
 
-## 🚀 快速上手 (Getting Started)
+运行前准备
 
-### 前置要求 (Prerequisites)
-- [Node.js](https://nodejs.org/) (建议 v18 及以上)
-- [Python](https://www.python.org/) (建议 v3.10 及以上)
+仓库不包含完整论文语料、Neo4j 实例或本地向量矩阵。架构生成需要预先准备知识图谱，以及对应的 `server/graph_storage/embeddings.npy` 和 `server/graph_storage/embedding_ids.json`。文献问答需要把论文 PDF 放入 `case_llm_artifact/original_articles/`，并构建检索索引。
 
-### 安装与运行 (Installation)
+需要一个兼容 OpenAI API 的聊天模型服务、已导入 DiaMaid 数据的 Neo4j 数据库，以及图谱使用的嵌入服务。默认嵌入模型为 DashScope `text-embedding-v4`，维度为 1024。图像问答和文档插图功能还需 DashScope API 密钥。环境变量模板见 `.env.example`；复制为根目录 `.env` 并填入自己的配置。不要提交 `.env` 或在代码中写入密钥。
 
-1. **获取代码**
-   ```bash
-   git clone https://github.com/yanjieZJU/DiaMaid_public.git
-   cd DiaMaid
-   ```
+安装与启动
 
-2. **启动后端服务 (Server)**
-   ```bash
-   cd server
-   # 推荐创建并激活您的虚拟环境，例如：python -m venv venv && source venv/bin/activate
-   pip install -r requirements.txt
-   
-   # 运行前请确保配置相应的环境变量 API 密钥 (可在代码端配置或使用 .env)
-   # export OPENAI_API_KEY="YOUR_API_KEY"
-   # export OPENAI_BASE_URL="YOUR_BASE_URL"
-   
-   # 启动后端程序 (默认运行在 http://localhost:8000)
-   python main.py
-   ```
+建议 Python 3.10+、Node.js 18+。在项目根目录运行 `pip install -r requirements.txt`。进入 `server/` 后运行 `python main.py`，默认监听 `http://localhost:8000`。另开终端进入 `client/`，运行 `npm install` 和 `npm run dev`，再访问 Vite 显示的地址。
 
-3. **启动前端客户端 (Client)**
-   ```bash
-   cd client
-   # 安装 npm 依赖
-   npm install
-   
-   # 运行 Vite 开发服务器
-   npm run dev
-   ```
-   启动成功后，即可在浏览器中访问 `http://localhost:5173`。
+启动前请确认 `.env`、Neo4j 和本地向量数据均已准备好。仅克隆仓库不足以直接运行架构生成。前端开发配置默认将 API 请求发送到 `http://localhost:8000`。
 
-## 📝 基本使用流程 (Usage Guide)
+接口入口
 
-1. **输入基础信息**：在页面左侧，您可以填入“被试 ID”用于本地追踪数据日志。
-2. **初始化生成**：
-   - 在底部的大文本框中，输入您的核心系统需求（例如：“设计一个能够跨域监控的大型物联网数据处理系统架构”）。
-   - 点击 **“开始生成流程图”**，等待等待进度更新。
-3. **查看多方案**：生成完成之后，屏幕会切入全屏审阅模式。顶部的 Tab 可以切换不同技术解决思路的方案（例如方案A、方案B），右侧画布能直观审视对应的拓扑图。
-4. **对话式修正**：在当前最佳的方案下，可在左侧输入框继续与系统对话（例如提出“请把消息队列换为Kafka”），AI 会根据需求演化出下一代修改版图形。
-5. **归档与导出**：一切就绪后，点击 **“导出为 Word”** 即可直接获取设计文档。
-
-## 🤝 贡献与许可 (Contributing & License)
-
-欢迎提交 issue 和 pull request 共同完善本项目。
-本项目采用 [MIT License](LICENSE) 开源协议。
+- 方案生成：`POST /generate`
+- 方案编辑：`POST /edit`
+- 文献问答：`POST /chat`
+- 会话管理：`/chat/sessions`
+- Word 导出：`POST /export`
+- 服务状态：`GET /ready`、`GET /ready/kg`、`GET /ready/rag`

@@ -5,6 +5,11 @@
   box-sizing: border-box;
 }
 
+@keyframes slideInRight {
+  from { transform: translateX(100%); opacity: 0; }
+  to   { transform: translateX(0);    opacity: 1; }
+}
+
 body {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   background-color: #eef0f4; /* 整体背景灰 */
@@ -70,6 +75,8 @@ header h1 {
   gap: 15px;
   background-color: transparent; /* 左侧本身透明，里面的卡片白色 */
   box-shadow: none; 
+  min-height: 0; /* 允许内部滚动区域正常分配空间 */
+  overflow: hidden; /* 把滚动交给内部块 */
 }
 
 /* 左侧的小卡片 */
@@ -80,6 +87,7 @@ header h1 {
   box-shadow: 0 1px 3px rgba(0,0,0,0.1);
   display: flex;
   flex-direction: column;
+  min-height: 0; /* 避免撑开，配合内部滚动块 */
 }
 
 .card-title {
@@ -217,7 +225,7 @@ textarea.styled-input:focus {
   display: flex;
   justify-content: center;
   align-items: center; /* 居中显示图表 */
-  padding: 40px;
+  padding: 10px;
 }
 
 /* --- 右侧边栏 --- */

@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useImperativeHandle, forwardRef } from 'react';
+import React, { useEffect, useImperativeHandle, forwardRef } from 'react';
 import ReactFlow, { Background, Controls, MarkerType, useNodesState, useEdgesState, ReactFlowProvider, getRectOfNodes, getTransformForBounds, useReactFlow } from 'reactflow';
 import { toPng } from 'html-to-image';
 import dagre from 'dagre';
@@ -336,7 +336,7 @@ const ResultFlowComponent = forwardRef(({ nodeDetails, onNodeClick, onPaneClick 
             setEdges(nextEdges);
         }
 
-    }, [nodeDetails]);
+    }, [nodeDetails, setNodes, setEdges]);
 
     return (
         <ReactFlow

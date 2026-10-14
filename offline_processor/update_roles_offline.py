@@ -1,13 +1,16 @@
 import os
 import json
 import httpx
+from pathlib import Path
+from dotenv import load_dotenv
 from openai import OpenAI
+
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 # --- Configuration ---
 DATA_DIR = "./case_llm_artifact/json_files"
-API_KEY = "sk-y44HwiOqlzdvdMwiVGmyzpITjGQdkwWS0bJuDMWN2awpHnX7"
-BASE_URL = "https://poloai.top/v1"
-
+API_KEY = os.environ.get("OPENAI_API_KEY")
+BASE_URL = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
 # Taxonomy Definition
 TAXONOMY = """
 1. **user_entity**
